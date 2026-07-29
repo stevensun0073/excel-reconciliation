@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local data (真实数据，不提交)
+data.xlsx
+
+# Generated output (程序生成的结果)
+result_reconciliation.xlsx
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
