@@ -1,4 +1,5 @@
 from excel_io import load_excel
+from matcher import Matcher
 
 TOLERANCE = 0.01
 
@@ -22,14 +23,8 @@ def main():
     print("Ready for Matching...")
     print("=" * 40)
 
-    # ===== 临时测试：显示前5条记录 =====
-    print("\nSheet1 前5条：")
-    for record in sheet1_records[:5]:
-        print(record)
-
-    print("\nSheet2 前5条：")
-    for record in sheet2_records[:5]:
-        print(record)
+    matcher = Matcher(sheet1_records, sheet2_records)
+    matcher.run()
 
 
 if __name__ == "__main__":
