@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+
 @dataclass
 class Record:
     """Represents one transaction record."""
@@ -12,3 +13,6 @@ class Record:
     match_type: str = ""
 
     partners: list[int] = field(default_factory=list)
+
+    review_required: bool = False
+    review_reason: str = ""

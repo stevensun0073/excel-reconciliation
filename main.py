@@ -1,30 +1,47 @@
-from excel_io import load_excel
-from matcher import Matcher
+from difference_analyzer import (
+    analyze_difference,
+    print_difference_summary,
+)
+from excel_io import load_excel, save_results
+from matcher import Matcher, TOLERANCE
 
-TOLERANCE = 0.01
+
+INPUT_FILE = "data.xlsx"
+OUTPUT_FILE = "result_reconciliation.xlsx"
 
 
 def main():
-
-    sheet1_records, sheet2_records = load_excel("data.xlsx")
-
-    print("=" * 40)
+    print("=" * 48)
     print(" Excel Reconciliation Tool")
-    print("=" * 40)
-    print()
+    print("=" * 48)
 
-    print(f"Sheet1 Records : {len(sheet1_records)}")
-    print(f"Sheet2 Records : {len(sheet2_records)}")
-    print()
+    workbook, sheet1_records, sheet2_records = load_excel(INPUT_FILE)
 
-    print(f"Tolerance : ±{TOLERANCE:.2f}")
+    print(f"Input file     : {INPUT_FILE}")
+    print(f"Sheet1 records : {len(sheet1_records)}")
+    print(f"Sheet2 records : {len(sheet2_records)}")
+    print(f"Tolerance      : ±{TOLERANCE}")
     print()
-
-    print("Ready for Matching...")
-    print("=" * 40)
 
     matcher = Matcher(sheet1_records, sheet2_records)
     matcher.run()
+
+    difference_result = analyze_difference(
+        sheet1_records=sheet1_records,
+        sheet2_records=sheet2_records,
+    )
+
+    print_difference_summary(difference_result)
+
+    save_results(
+        workbook=workbook,
+        sheet1_records=sheet1_records,
+        sheet2_records=sheet2_records,
+        output_filename=OUTPUT_FILE,
+    )
+
+    print()
+    print(f"Result saved: {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
