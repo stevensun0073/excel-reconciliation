@@ -1,9 +1,9 @@
-from decimal import Decimal, ROUND_HALF_UP
+import re
+from decimal import Decimal
 from itertools import combinations
-from typing import Optional
+from typing import Callable, Optional
 
 
-TOLERANCE = Decimal("0.01")
 MAX_GROUP_SIZE = 6
 
 NUMBER_NAMES = {
@@ -29,8 +29,13 @@ MANY_TO_MANY_PATTERNS = [
 
 
 def amount_equal(left: Decimal, right: Decimal) -> bool:
-    """判断两个金额是否在允许误差范围内相等。"""
-    return abs(left - right) <= TOLERANCE
+    """
+    判断两个金额是否完全相等。
+
+    银行对账不允许金额误差。
+    例如 100.00 与 99.99 不属于相同金额。
+    """
+    return left == right
 
 
 def amount_sign(amount: Decimal) -> int:
@@ -50,24 +55,6 @@ def amount_sign(amount: Decimal) -> int:
     return 0
 
 
-def amount_to_cents(amount: Decimal) -> int:
-    """
-    将金额转换为整数分，用作组合金额索引。
-
-    例如：
-
-    Decimal("123.45") -> 12345
-    Decimal("-123.45") -> -12345
-    """
-    cents = (
-        amount * Decimal("100")
-    ).to_integral_value(
-        rounding=ROUND_HALF_UP
-    )
-
-    return int(cents)
-
-
 def sum_records(records) -> Decimal:
     """计算一组记录的金额合计。"""
     return sum(
@@ -85,6 +72,97 @@ def build_match_type(
         f"{NUMBER_NAMES[left_size]}"
         f"-to-"
         f"{NUMBER_NAMES[right_size]}"
+    )
+
+
+def extract_first_three_words(value) -> list[str]:
+    """
+    从一个字段中提取前三个单词。
+
+    处理规则：
+    1. 转为大写；
+    2. 标点符号作为分隔符；
+    3. 保留英文字母和数字；
+    4. 最多取前三个单词。
+    """
+    if value is None:
+        return []
+
+    words = re.findall(
+        r"[A-Z0-9]+",
+        str(value).upper(),
+    )
+
+    return words[:3]
+
+
+def build_sheet2_keyword_set(record) -> set[str]:
+    """
+    为一条 Sheet2 记录建立关键词集合。
+
+    分别取以下两列的前三个单词：
+
+    - Recipient's Account Name
+    - Description
+
+    然后合并成一个集合。
+    """
+    extra = (
+        record.extra
+        if isinstance(record.extra, dict)
+        else {}
+    )
+
+    recipient_words = extract_first_three_words(
+        extra.get("Recipient's Account Name")
+    )
+
+    description_words = extract_first_three_words(
+        extra.get("Description")
+    )
+
+    return set(
+        recipient_words
+        + description_words
+    )
+
+
+def sheet2_group_has_common_words(
+    records,
+    minimum_common_words: int = 2,
+) -> bool:
+    """
+    判断一组 Sheet2 记录是否至少共享两个单词。
+
+    每条记录都使用：
+
+    - Recipient's Account Name 的前三个单词；
+    - Description 的前三个单词。
+
+    只有至少两个单词同时出现在组合中的每一条记录里，
+    才允许 Sheet1 一笔对应 Sheet2 多笔。
+    """
+    if len(records) < 2:
+        return False
+
+    keyword_sets = [
+        build_sheet2_keyword_set(record)
+        for record in records
+    ]
+
+    if any(
+        not keyword_set
+        for keyword_set in keyword_sets
+    ):
+        return False
+
+    common_words = set.intersection(
+        *keyword_sets
+    )
+
+    return (
+        len(common_words)
+        >= minimum_common_words
     )
 
 
@@ -110,7 +188,7 @@ class Matcher:
 
     所有组合匹配必须满足：
 
-    1. 两边金额合计相等，允许误差 ±0.01；
+    1. 两边金额合计完全相等；
     2. 同一组合内所有金额方向一致；
     3. 正数只能与正数匹配；
     4. 负数只能与负数匹配；
@@ -170,9 +248,7 @@ class Matcher:
                 record.review_reason = ""
 
     def run(self):
-        """
-        按照由简单到复杂的顺序执行全部匹配。
-        """
+        """按照由简单到复杂的顺序执行全部匹配。"""
         results = {}
 
         # 第一层：一对一
@@ -231,7 +307,7 @@ class Matcher:
         """
         执行一对一匹配。
 
-        金额在误差范围内相等，即确认匹配。
+        只有金额完全相等，才确认匹配。
         """
         matched_groups = 0
 
@@ -300,13 +376,17 @@ class Matcher:
         target,
         candidates,
         group_size: int,
+        combination_validator: Optional[
+            Callable[[list], bool]
+        ] = None,
     ) -> Optional[list]:
         """
         从候选记录中寻找固定笔数的金额组合。
 
         例如 group_size=3：
 
-        寻找三条候选记录，使其金额合计等于目标金额。
+        寻找三条候选记录，使其金额合计
+        与目标金额完全相等。
 
         采用递归回溯及金额范围剪枝。
         """
@@ -331,15 +411,31 @@ class Matcher:
             current_sum: Decimal,
         ):
             if remaining_count == 0:
-                if amount_equal(
+                if not amount_equal(
                     current_sum,
                     target_value,
                 ):
-                    return list(
-                        selected_indexes
-                    )
+                    return None
 
-                return None
+                selected_records = [
+                    candidates[index]
+                    for index in selected_indexes
+                ]
+
+                if (
+                    combination_validator
+                    is not None
+                    and not combination_validator(
+                        selected_records
+                    )
+                ):
+                    # 金额相等但文字条件不合格时，
+                    # 继续搜索其他金额组合。
+                    return None
+
+                return list(
+                    selected_indexes
+                )
 
             available_count = (
                 len(candidates)
@@ -349,10 +445,7 @@ class Matcher:
             if available_count < remaining_count:
                 return None
 
-            if (
-                current_sum
-                > target_value + TOLERANCE
-            ):
+            if current_sum > target_value:
                 return None
 
             smallest_possible = (
@@ -367,10 +460,7 @@ class Matcher:
                 )
             )
 
-            if (
-                smallest_possible
-                > target_value + TOLERANCE
-            ):
+            if smallest_possible > target_value:
                 return None
 
             largest_possible = (
@@ -384,10 +474,7 @@ class Matcher:
                 )
             )
 
-            if (
-                largest_possible
-                < target_value - TOLERANCE
-            ):
+            if largest_possible < target_value:
                 return None
 
             last_possible_index = (
@@ -399,16 +486,10 @@ class Matcher:
                 start_index,
                 last_possible_index + 1,
             ):
-                value = (
-                    candidate_values[index]
-                )
-
+                value = candidate_values[index]
                 new_sum = current_sum + value
 
-                if (
-                    new_sum
-                    > target_value + TOLERANCE
-                ):
+                if new_sum > target_value:
                     break
 
                 selected_indexes.append(index)
@@ -456,6 +537,12 @@ class Matcher:
         1↔4
         1↔5
         1↔6
+
+        除金额完全相等之外，参与组合的每条 Sheet2 记录：
+
+        1. 取 Recipient's Account Name 的前三个单词；
+        2. 取 Description 的前三个单词；
+        3. 合并后，所有记录必须至少共享两个单词。
         """
         matched_groups = 0
 
@@ -479,6 +566,9 @@ class Matcher:
                 target=left,
                 candidates=candidates,
                 group_size=group_size,
+                combination_validator=(
+                    sheet2_group_has_common_words
+                ),
             )
 
             if combination is None:
@@ -573,23 +663,19 @@ class Matcher:
         group_size: int,
     ):
         """
-        为固定笔数组合建立金额索引。
+        为固定笔数组合建立精确金额索引。
 
         索引格式：
 
         {
-            金额分数: [
+            Decimal金额合计: [
                 记录组合1,
                 记录组合2,
                 ...
             ]
         }
 
-        例如两条记录合计 100.00：
-
-        {
-            10000: [(record_a, record_b)]
-        }
+        不进行四舍五入，也不允许一分钱误差。
         """
         index = {}
 
@@ -598,10 +684,9 @@ class Matcher:
             group_size,
         ):
             total = sum_records(group)
-            key = amount_to_cents(total)
 
             index.setdefault(
-                key,
+                total,
                 [],
             ).append(group)
 
@@ -626,10 +711,10 @@ class Matcher:
         算法：
 
         1. 正数和负数分别处理；
-        2. 为右侧组合建立金额索引；
+        2. 为右侧组合建立精确金额索引；
         3. 遍历左侧组合；
-        4. 通过金额索引直接查找右侧候选；
-        5. 最后再次核对 Decimal 金额差；
+        4. 使用 Decimal 合计直接查找；
+        5. 最后再次进行精确金额核对；
         6. 已使用记录不能再次使用。
         """
         match_type = build_match_type(
@@ -662,9 +747,7 @@ class Matcher:
             if len(right_records) < right_size:
                 continue
 
-            # 右侧组合只建立一次索引。
-            # 同一轮中已经被使用的组合会通过
-            # used_right_ids 排除。
+            # 右侧组合只建立一次精确金额索引。
             right_index = (
                 self.build_combination_index(
                     records=right_records,
@@ -684,73 +767,45 @@ class Matcher:
                     for record in left_group
                 }
 
-                if (
-                    left_ids
-                    & used_left_ids
-                ):
+                if left_ids & used_left_ids:
                     continue
 
                 left_total = sum_records(
                     left_group
                 )
 
-                left_key = amount_to_cents(
-                    left_total
+                candidate_groups = (
+                    right_index.get(
+                        left_total,
+                        [],
+                    )
                 )
 
                 matched_right_group = None
 
-                # 因为容差是 ±0.01，
-                # 同时检查相邻的一分钱索引。
-                possible_keys = (
-                    left_key - 1,
-                    left_key,
-                    left_key + 1,
-                )
+                for right_group in candidate_groups:
+                    right_ids = {
+                        id(record)
+                        for record in right_group
+                    }
 
-                for possible_key in possible_keys:
-                    candidate_groups = (
-                        right_index.get(
-                            possible_key,
-                            [],
-                        )
+                    if right_ids & used_right_ids:
+                        continue
+
+                    right_total = sum_records(
+                        right_group
                     )
 
-                    for right_group in (
-                        candidate_groups
+                    if not amount_equal(
+                        left_total,
+                        right_total,
                     ):
-                        right_ids = {
-                            id(record)
-                            for record in right_group
-                        }
+                        continue
 
-                        if (
-                            right_ids
-                            & used_right_ids
-                        ):
-                            continue
-
-                        right_total = sum_records(
-                            right_group
-                        )
-
-                        if not amount_equal(
-                            left_total,
-                            right_total,
-                        ):
-                            continue
-
-                        matched_right_group = (
-                            right_group
-                        )
-
-                        break
-
-                    if (
-                        matched_right_group
-                        is not None
-                    ):
-                        break
+                    matched_right_group = (
+                        right_group
+                    )
+                    break
 
                 if matched_right_group is None:
                     continue

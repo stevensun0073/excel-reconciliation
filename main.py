@@ -3,7 +3,7 @@ from difference_analyzer import (
     print_difference_summary,
 )
 from excel_io import load_excel, save_results
-from matcher import Matcher, TOLERANCE
+from matcher import Matcher
 
 
 INPUT_FILE = "data.xlsx"
@@ -15,15 +15,20 @@ def main():
     print(" Excel Reconciliation Tool")
     print("=" * 48)
 
-    workbook, sheet1_records, sheet2_records = load_excel(INPUT_FILE)
+    workbook, sheet1_records, sheet2_records = load_excel(
+        INPUT_FILE
+    )
 
     print(f"Input file     : {INPUT_FILE}")
     print(f"Sheet1 records : {len(sheet1_records)}")
     print(f"Sheet2 records : {len(sheet2_records)}")
-    print(f"Tolerance      : ±{TOLERANCE}")
+    print("Matching rule  : Exact amount only")
     print()
 
-    matcher = Matcher(sheet1_records, sheet2_records)
+    matcher = Matcher(
+        sheet1_records,
+        sheet2_records,
+    )
     matcher.run()
 
     difference_result = analyze_difference(
@@ -31,13 +36,16 @@ def main():
         sheet2_records=sheet2_records,
     )
 
-    print_difference_summary(difference_result)
+    print_difference_summary(
+        difference_result
+    )
 
     save_results(
         workbook=workbook,
         sheet1_records=sheet1_records,
         sheet2_records=sheet2_records,
         output_filename=OUTPUT_FILE,
+        difference_result=difference_result,
     )
 
     print()

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Any
 
 
 @dataclass
@@ -8,6 +9,13 @@ class Record:
 
     row: int
     amount: Decimal
+
+    # 原始工作表名称，例如 Sheet1 / Sheet2
+    source_sheet: str = ""
+
+    # 保存原始 Excel 中的辅助信息
+    # 例如流水号、摘要、日期、账户名、业务类型等
+    extra: dict[str, Any] = field(default_factory=dict)
 
     matched: bool = False
     match_type: str = ""
