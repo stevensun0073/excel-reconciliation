@@ -4,7 +4,7 @@ from itertools import combinations
 from typing import Callable, Optional
 
 
-MAX_GROUP_SIZE = 6
+MAX_GROUP_SIZE = 10
 
 NUMBER_NAMES = {
     1: "One",
@@ -13,18 +13,22 @@ NUMBER_NAMES = {
     4: "Four",
     5: "Five",
     6: "Six",
+    7: "Seven",
+    8: "Eight",
+    9: "Nine",
+    10: "Ten",
 }
 
-# 多对多匹配的执行顺序。
-#
-# 必须优先执行较简单的组合，避免本来可以按 2↔2
-# 解释的记录被提前放入 2↔4 等更复杂的组合。
 MANY_TO_MANY_PATTERNS = [
     (2, 2),
     (2, 3),
     (3, 2),
     (2, 4),
     (4, 2),
+    (2, 5),
+    (5, 2),
+    (2, 6),
+    (6, 2),
 ]
 
 
@@ -33,19 +37,11 @@ def amount_equal(left: Decimal, right: Decimal) -> bool:
     判断两个金额是否完全相等。
 
     银行对账不允许金额误差。
-    例如 100.00 与 99.99 不属于相同金额。
     """
     return left == right
 
 
 def amount_sign(amount: Decimal) -> int:
-    """
-    返回金额方向。
-
-    正数：1
-    负数：-1
-    零：0
-    """
     if amount > 0:
         return 1
 
@@ -56,7 +52,6 @@ def amount_sign(amount: Decimal) -> int:
 
 
 def sum_records(records) -> Decimal:
-    """计算一组记录的金额合计。"""
     return sum(
         (record.amount for record in records),
         Decimal("0"),
@@ -67,7 +62,6 @@ def build_match_type(
     left_size: int,
     right_size: int,
 ) -> str:
-    """生成 One-to-Two、Two-to-Four 等匹配名称。"""
     return (
         f"{NUMBER_NAMES[left_size]}"
         f"-to-"
@@ -75,16 +69,88 @@ def build_match_type(
     )
 
 
-def extract_first_three_words(value) -> list[str]:
-    """
-    从一个字段中提取前三个单词。
+def normalize_keyword(value) -> str:
+    """把一个 Key word 标准化，比较时不区分大小写。"""
 
-    处理规则：
-    1. 转为大写；
-    2. 标点符号作为分隔符；
-    3. 保留英文字母和数字；
-    4. 最多取前三个单词。
+    if value is None:
+        return ""
+
+    return str(value).strip().casefold()
+
+
+def parse_sheet1_keywords(record) -> set[str]:
     """
+    Sheet1 的 Key word 可能有多个，用分号分隔。
+
+    例如：
+        ETONG; ALFEM; ENGINEERING
+    """
+
+    extra = (
+        record.extra
+        if isinstance(record.extra, dict)
+        else {}
+    )
+
+    raw_value = extra.get("Key word")
+
+    if raw_value is None:
+        return set()
+
+    return {
+        normalize_keyword(part)
+        for part in str(raw_value).split(";")
+        if normalize_keyword(part)
+    }
+
+
+def get_sheet2_keyword(record) -> str:
+    """
+    Sheet2 的 Key word 应只有一个。
+    """
+
+    extra = (
+        record.extra
+        if isinstance(record.extra, dict)
+        else {}
+    )
+
+    return normalize_keyword(
+        extra.get("Key word")
+    )
+
+
+def one_to_one_keywords_match(
+    sheet1_record,
+    sheet2_record,
+) -> bool:
+    """
+    一对一关键词规则：
+
+    只要 Sheet2 的单个 Key word 出现在
+    Sheet1 的 Key word 集合中，就算完全匹配。
+
+    任一方为空时返回 False。
+    """
+
+    sheet1_keywords = parse_sheet1_keywords(
+        sheet1_record
+    )
+
+    sheet2_keyword = get_sheet2_keyword(
+        sheet2_record
+    )
+
+    if not sheet1_keywords:
+        return False
+
+    if not sheet2_keyword:
+        return False
+
+    return sheet2_keyword in sheet1_keywords
+
+
+def extract_first_three_words(value) -> list[str]:
     if value is None:
         return []
 
@@ -97,16 +163,6 @@ def extract_first_three_words(value) -> list[str]:
 
 
 def build_sheet2_keyword_set(record) -> set[str]:
-    """
-    为一条 Sheet2 记录建立关键词集合。
-
-    分别取以下两列的前三个单词：
-
-    - Recipient's Account Name
-    - Description
-
-    然后合并成一个集合。
-    """
     extra = (
         record.extra
         if isinstance(record.extra, dict)
@@ -131,17 +187,6 @@ def sheet2_group_has_common_words(
     records,
     minimum_common_words: int = 2,
 ) -> bool:
-    """
-    判断一组 Sheet2 记录是否至少共享两个单词。
-
-    每条记录都使用：
-
-    - Recipient's Account Name 的前三个单词；
-    - Description 的前三个单词。
-
-    只有至少两个单词同时出现在组合中的每一条记录里，
-    才允许 Sheet1 一笔对应 Sheet2 多笔。
-    """
     if len(records) < 2:
         return False
 
@@ -170,30 +215,19 @@ class Matcher:
     """
     银行日记账与银行对账单匹配引擎。
 
-    当前自动匹配范围：
+    本版本只升级一对一匹配：
 
-    一对一：
-        1↔1
+    1. 金额必须完全相同；
+    2. 优先在相同金额候选中寻找 Key word 匹配的记录；
+    3. 如果存在 Key word 匹配：
+       两边记录标记 keyword_match=True；
+    4. 如果相同金额候选均不匹配 Key word：
+       仍按金额确认一对一，
+       两边记录标记 keyword_conflict=True；
+    5. 任一边 Key word 为空，也属于关键词冲突。
 
-    一对多和多对一：
-        1↔2 至 1↔6
-        2↔1 至 6↔1
-
-    有限多对多：
-        2↔2
-        2↔3
-        3↔2
-        2↔4
-        4↔2
-
-    所有组合匹配必须满足：
-
-    1. 两边金额合计完全相等；
-    2. 同一组合内所有金额方向一致；
-    3. 正数只能与正数匹配；
-    4. 负数只能与负数匹配；
-    5. 每条记录只能匹配一次；
-    6. 优先处理笔数较少的组合。
+    一对多和多对一先按 Key word 业务索引分池，再搜索金额组合。
+多对多暂时关闭，待本阶段验证后再启用。
     """
 
     def __init__(
@@ -204,17 +238,111 @@ class Matcher:
         self.sheet1 = sheet1_records
         self.sheet2 = sheet2_records
 
+        # Key word 业务索引。
+        #
+        # Sheet1 一条记录可能有多个关键词，因此可以进入多个业务池。
+        # Sheet2 一条记录只有一个关键词，因此只进入一个业务池。
+        #
+        # 索引只保存记录引用；是否已匹配、金额方向等条件，
+        # 在实际搜索时动态检查。
+        self.sheet1_keyword_index = (
+            self.build_sheet1_keyword_index()
+        )
+        self.sheet2_keyword_index = (
+            self.build_sheet2_keyword_index()
+        )
+    def build_sheet1_keyword_index(self):
+        """
+        建立 Sheet1 的 Key word 索引。
+
+        示例：
+            ETONG; ALFEM
+
+        会同时进入：
+            ETONG -> [record]
+            ALFEM -> [record]
+        """
+        index = {}
+
+        for record in self.sheet1:
+            for keyword in parse_sheet1_keywords(
+                record
+            ):
+                index.setdefault(
+                    keyword,
+                    [],
+                ).append(record)
+
+        return index
+
+    def build_sheet2_keyword_index(self):
+        """
+        建立 Sheet2 的 Key word 索引。
+
+        Sheet2 每条记录只应有一个 Key word。
+        空白关键词不进入索引。
+        """
+        index = {}
+
+        for record in self.sheet2:
+            keyword = get_sheet2_keyword(
+                record
+            )
+
+            if not keyword:
+                continue
+
+            index.setdefault(
+                keyword,
+                [],
+            ).append(record)
+
+        return index
+
+    @staticmethod
+    def filter_candidates(
+        target,
+        records,
+    ):
+        """
+        从业务池中筛选：
+
+        1. 尚未匹配；
+        2. 与目标金额方向一致；
+        3. 零金额不参加组合。
+
+        最后按金额绝对值从小到大排序，
+        供递归组合搜索使用。
+        """
+        target_sign = amount_sign(
+            target.amount
+        )
+
+        if target_sign == 0:
+            return []
+
+        candidates = [
+            record
+            for record in records
+            if (
+                not record.matched
+                and amount_sign(record.amount)
+                == target_sign
+            )
+        ]
+
+        candidates.sort(
+            key=lambda record: abs(record.amount)
+        )
+
+        return candidates
+
     @staticmethod
     def mark_match(
         left_records,
         right_records,
         match_type: str,
     ) -> None:
-        """
-        将左右两组记录登记为已匹配。
-
-        每条记录的 partners 保存对方工作表中的行号。
-        """
         left_rows = [
             record.row
             for record in left_records
@@ -247,16 +375,69 @@ class Matcher:
             if hasattr(record, "review_reason"):
                 record.review_reason = ""
 
+    @staticmethod
+    def set_one_to_one_keyword_result(
+        left,
+        right,
+        keyword_matched: bool,
+    ) -> None:
+        """
+        把一对一关键词核验结果写入两边记录。
+        """
+
+        for record in (left, right):
+            record.keyword_match = keyword_matched
+            record.keyword_conflict = (
+                not keyword_matched
+            )
+
+            if keyword_matched:
+                record.match_type = "One-to-One"
+                record.review_required = False
+                record.review_reason = ""
+            else:
+                record.match_type = "One-to-One (KW)"
+                record.review_required = False
+                record.review_reason = ""
+
     def run(self):
-        """按照由简单到复杂的顺序执行全部匹配。"""
+        """
+        按顺序执行匹配。
+
+        1. 一对一；
+        2. 一对多 / 多对一，最多 1↔10；
+        3. 多对多只启用：
+           2↔2
+           2↔3 / 3↔2
+           2↔4 / 4↔2
+           2↔5 / 5↔2
+           2↔6 / 6↔2
+        4. 不执行 3↔3 及以上两边都至少为 3 的组合。
+        """
         results = {}
 
-        # 第一层：一对一
-        results["One-to-One"] = (
+        one_to_one_total = (
             self.one_to_one_match()
         )
 
-        # 第二层：一对多及多对一
+        one_to_one_kw = sum(
+            1
+            for record in self.sheet1
+            if (
+                record.matched
+                and record.match_type
+                == "One-to-One (KW)"
+            )
+        )
+
+        results["One-to-One"] = (
+            one_to_one_total
+            - one_to_one_kw
+        )
+        results["One-to-One (KW)"] = (
+            one_to_one_kw
+        )
+
         for group_size in range(
             2,
             MAX_GROUP_SIZE + 1,
@@ -283,7 +464,6 @@ class Matcher:
                 )
             )
 
-        # 第三层：有限多对多
         for left_size, right_size in (
             MANY_TO_MANY_PATTERNS
         ):
@@ -302,28 +482,58 @@ class Matcher:
         self.print_summary(results)
 
         return results
-
     def one_to_one_match(self) -> int:
         """
         执行一对一匹配。
 
-        只有金额完全相等，才确认匹配。
+        规则：
+        1. 金额必须完全相等；
+        2. 金额在两边都唯一时，直接按金额匹配，
+           再用 Key word 决定颜色；
+        3. 金额在任一边重复时，只允许
+           Sheet2 的单个 Key word 出现在
+           Sheet1 的 Key word 集合中时匹配；
+        4. 重复金额但关键词不匹配或为空时，
+           留给后续组合匹配。
         """
         matched_groups = 0
 
-        for left in self.sheet1:
-            if left.matched:
+        sheet1_by_amount = {}
+        sheet2_by_amount = {}
+
+        for record in self.sheet1:
+            if not record.matched:
+                sheet1_by_amount.setdefault(
+                    record.amount,
+                    [],
+                ).append(record)
+
+        for record in self.sheet2:
+            if not record.matched:
+                sheet2_by_amount.setdefault(
+                    record.amount,
+                    [],
+                ).append(record)
+
+        for amount, left_group in sheet1_by_amount.items():
+            right_group = sheet2_by_amount.get(amount)
+
+            if not right_group:
                 continue
 
-            for right in self.sheet2:
-                if right.matched:
-                    continue
+            if (
+                len(left_group) == 1
+                and len(right_group) == 1
+            ):
+                left = left_group[0]
+                right = right_group[0]
 
-                if not amount_equal(
-                    left.amount,
-                    right.amount,
-                ):
-                    continue
+                keyword_matched = (
+                    one_to_one_keywords_match(
+                        left,
+                        right,
+                    )
+                )
 
                 self.mark_match(
                     left_records=[left],
@@ -331,23 +541,55 @@ class Matcher:
                     match_type="One-to-One",
                 )
 
+                self.set_one_to_one_keyword_result(
+                    left=left,
+                    right=right,
+                    keyword_matched=keyword_matched,
+                )
+
                 matched_groups += 1
-                break
+                continue
+
+            for right in right_group:
+                if right.matched:
+                    continue
+
+                matched_left = None
+
+                for left in left_group:
+                    if left.matched:
+                        continue
+
+                    if one_to_one_keywords_match(
+                        left,
+                        right,
+                    ):
+                        matched_left = left
+                        break
+
+                if matched_left is None:
+                    continue
+
+                self.mark_match(
+                    left_records=[matched_left],
+                    right_records=[right],
+                    match_type="One-to-One",
+                )
+
+                self.set_one_to_one_keyword_result(
+                    left=matched_left,
+                    right=right,
+                    keyword_matched=True,
+                )
+
+                matched_groups += 1
 
         return matched_groups
-
     @staticmethod
     def get_same_direction_candidates(
         target,
         records,
     ):
-        """
-        取得与目标金额同方向的未匹配候选记录。
-
-        正数目标只能使用正数候选；
-        负数目标只能使用负数候选；
-        零金额不参加组合匹配。
-        """
         target_sign = amount_sign(
             target.amount
         )
@@ -380,16 +622,6 @@ class Matcher:
             Callable[[list], bool]
         ] = None,
     ) -> Optional[list]:
-        """
-        从候选记录中寻找固定笔数的金额组合。
-
-        例如 group_size=3：
-
-        寻找三条候选记录，使其金额合计
-        与目标金额完全相等。
-
-        采用递归回溯及金额范围剪枝。
-        """
         if group_size < 2:
             return None
 
@@ -429,8 +661,6 @@ class Matcher:
                         selected_records
                     )
                 ):
-                    # 金额相等但文字条件不合格时，
-                    # 继续搜索其他金额组合。
                     return None
 
                 return list(
@@ -528,21 +758,16 @@ class Matcher:
         group_size: int,
     ) -> int:
         """
-        Sheet1 一笔对应 Sheet2 多笔。
+        Sheet1 一笔对应 Sheet2 多笔，最多 1↔10。
 
-        支持：
+        执行顺序：
+        1. 读取目标 Sheet1 的关键词集合；
+        2. 直接从 Sheet2 Key word 索引取得同业务候选；
+        3. 再筛选未匹配、同金额方向的记录；
+        4. 最后搜索金额完全相等的固定笔数组合。
 
-        1↔2
-        1↔3
-        1↔4
-        1↔5
-        1↔6
-
-        除金额完全相等之外，参与组合的每条 Sheet2 记录：
-
-        1. 取 Recipient's Account Name 的前三个单词；
-        2. 取 Description 的前三个单词；
-        3. 合并后，所有记录必须至少共享两个单词。
+        每条 Sheet2 的单个 Key word 都必须包含在
+        目标 Sheet1 的 Key word 集合中。
         """
         matched_groups = 0
 
@@ -555,20 +780,39 @@ class Matcher:
             if left.matched:
                 continue
 
-            candidates = (
-                self.get_same_direction_candidates(
-                    target=left,
-                    records=self.sheet2,
-                )
+            left_keywords = parse_sheet1_keywords(
+                left
+            )
+
+            if not left_keywords:
+                continue
+
+            # 从多个关键词业务池中合并候选，并按对象身份去重。
+            indexed_records = []
+            seen_ids = set()
+
+            for keyword in left_keywords:
+                for right in self.sheet2_keyword_index.get(
+                    keyword,
+                    [],
+                ):
+                    record_id = id(right)
+
+                    if record_id in seen_ids:
+                        continue
+
+                    seen_ids.add(record_id)
+                    indexed_records.append(right)
+
+            candidates = self.filter_candidates(
+                target=left,
+                records=indexed_records,
             )
 
             combination = self.find_combination(
                 target=left,
                 candidates=candidates,
                 group_size=group_size,
-                combination_validator=(
-                    sheet2_group_has_common_words
-                ),
             )
 
             if combination is None:
@@ -583,21 +827,21 @@ class Matcher:
             matched_groups += 1
 
         return matched_groups
-
     def many_to_one_match(
         self,
         group_size: int,
     ) -> int:
         """
-        Sheet1 多笔对应 Sheet2 一笔。
+        Sheet1 多笔对应 Sheet2 一笔，最多 10↔1。
 
-        支持：
+        执行顺序：
+        1. 读取目标 Sheet2 的单个 Key word；
+        2. 直接从 Sheet1 Key word 索引取得同业务候选；
+        3. 再筛选未匹配、同金额方向的记录；
+        4. 最后搜索金额完全相等的固定笔数组合。
 
-        2↔1
-        3↔1
-        4↔1
-        5↔1
-        6↔1
+        每条候选 Sheet1 的关键词集合中，
+        都包含该 Sheet2 Key word。
         """
         matched_groups = 0
 
@@ -610,11 +854,23 @@ class Matcher:
             if right.matched:
                 continue
 
-            candidates = (
-                self.get_same_direction_candidates(
-                    target=right,
-                    records=self.sheet1,
+            right_keyword = get_sheet2_keyword(
+                right
+            )
+
+            if not right_keyword:
+                continue
+
+            indexed_records = (
+                self.sheet1_keyword_index.get(
+                    right_keyword,
+                    [],
                 )
+            )
+
+            candidates = self.filter_candidates(
+                target=right,
+                records=indexed_records,
             )
 
             combination = self.find_combination(
@@ -635,18 +891,69 @@ class Matcher:
             matched_groups += 1
 
         return matched_groups
+    @staticmethod
+    def groups_share_keyword(
+        left_group,
+        right_group,
+    ) -> bool:
+        """
+        判断一个多对多组合是否属于同一业务关键词池。
+
+        规则：
+        1. 每条 Sheet2 必须有且只有一个 Key word；
+        2. 每条 Sheet2 的 Key word 至少出现在一条 Sheet1 的关键词集合中；
+        3. 每条 Sheet1 至少包含所选 Sheet2 的一个 Key word；
+        4. 任一方关键词为空时不允许进入多对多匹配。
+        """
+        right_keywords = [
+            get_sheet2_keyword(record)
+            for record in right_group
+        ]
+
+        if any(
+            not keyword
+            for keyword in right_keywords
+        ):
+            return False
+
+        right_keyword_set = set(
+            right_keywords
+        )
+
+        left_keyword_sets = [
+            parse_sheet1_keywords(record)
+            for record in left_group
+        ]
+
+        if any(
+            not keyword_set
+            for keyword_set in left_keyword_sets
+        ):
+            return False
+
+        # 每个 Sheet2 关键词都必须在至少一条 Sheet1 中出现。
+        for keyword in right_keyword_set:
+            if not any(
+                keyword in keyword_set
+                for keyword_set in left_keyword_sets
+            ):
+                return False
+
+        # 每条 Sheet1 都必须至少关联到一个 Sheet2 关键词。
+        for keyword_set in left_keyword_sets:
+            if not (
+                keyword_set
+                & right_keyword_set
+            ):
+                return False
+
+        return True
 
     @staticmethod
     def get_unmatched_records_by_sign(
         records,
         sign: int,
     ):
-        """
-        取得指定方向的未匹配记录。
-
-        sign=1：正数
-        sign=-1：负数
-        """
         return [
             record
             for record in records
@@ -662,21 +969,6 @@ class Matcher:
         records,
         group_size: int,
     ):
-        """
-        为固定笔数组合建立精确金额索引。
-
-        索引格式：
-
-        {
-            Decimal金额合计: [
-                记录组合1,
-                记录组合2,
-                ...
-            ]
-        }
-
-        不进行四舍五入，也不允许一分钱误差。
-        """
         index = {}
 
         for group in combinations(
@@ -698,24 +990,29 @@ class Matcher:
         right_size: int,
     ) -> int:
         """
-        执行有限多对多匹配。
+        执行关键词优先的多对多匹配。
 
-        当前调用范围：
+        当前范围：
+            2↔2
+            2↔3 / 3↔2
+            2↔4 / 4↔2
+            2↔5 / 5↔2
+            2↔6 / 6↔2
 
-        2↔2
-        2↔3
-        3↔2
-        2↔4
-        4↔2
+        优化后的算法：
 
-        算法：
+        1. 按单一 Key word 建立业务池；
+        2. 正数与负数分别处理；
+        3. 两边所有候选都必须属于同一个 Key word；
+        4. 始终先为“两笔的一侧”建立金额索引；
+        5. 另一侧只枚举一次固定笔数组合；
+        6. 用金额合计直接查找，不做两层组合嵌套；
+        7. 金额必须完全相等；
+        8. 匹配成功后立即锁定记录。
 
-        1. 正数和负数分别处理；
-        2. 为右侧组合建立精确金额索引；
-        3. 遍历左侧组合；
-        4. 使用 Decimal 合计直接查找；
-        5. 最后再次进行精确金额核对；
-        6. 已使用记录不能再次使用。
+        这样 2↔6 或 6↔2 时，不再出现：
+            所有两笔组合 × 所有六笔组合
+        的巨大笛卡尔积。
         """
         match_type = build_match_type(
             left_size=left_size,
@@ -724,122 +1021,219 @@ class Matcher:
 
         matched_groups = 0
 
-        # 正数和负数分别匹配，
-        # 保证不会出现方向混合。
-        for sign in (1, -1):
-            left_records = (
-                self.get_unmatched_records_by_sign(
-                    records=self.sheet1,
-                    sign=sign,
-                )
-            )
+        common_keywords = sorted(
+            set(self.sheet1_keyword_index)
+            & set(self.sheet2_keyword_index)
+        )
 
-            right_records = (
-                self.get_unmatched_records_by_sign(
-                    records=self.sheet2,
-                    sign=sign,
-                )
-            )
+        print(
+            f"  Searching {match_type} "
+            f"across {len(common_keywords)} keyword pool(s)..."
+        )
 
-            if len(left_records) < left_size:
-                continue
-
-            if len(right_records) < right_size:
-                continue
-
-            # 右侧组合只建立一次精确金额索引。
-            right_index = (
-                self.build_combination_index(
-                    records=right_records,
-                    group_size=right_size,
-                )
-            )
-
-            used_left_ids = set()
-            used_right_ids = set()
-
-            for left_group in combinations(
-                left_records,
-                left_size,
-            ):
-                left_ids = {
-                    id(record)
-                    for record in left_group
-                }
-
-                if left_ids & used_left_ids:
-                    continue
-
-                left_total = sum_records(
-                    left_group
-                )
-
-                candidate_groups = (
-                    right_index.get(
-                        left_total,
+        for keyword in common_keywords:
+            for sign in (1, -1):
+                left_records = [
+                    record
+                    for record in self.sheet1_keyword_index.get(
+                        keyword,
                         [],
                     )
-                )
-
-                matched_right_group = None
-
-                for right_group in candidate_groups:
-                    right_ids = {
-                        id(record)
-                        for record in right_group
-                    }
-
-                    if right_ids & used_right_ids:
-                        continue
-
-                    right_total = sum_records(
-                        right_group
+                    if (
+                        not record.matched
+                        and amount_sign(record.amount) == sign
                     )
+                ]
 
-                    if not amount_equal(
-                        left_total,
-                        right_total,
-                    ):
-                        continue
-
-                    matched_right_group = (
-                        right_group
+                right_records = [
+                    record
+                    for record in self.sheet2_keyword_index.get(
+                        keyword,
+                        [],
                     )
-                    break
+                    if (
+                        not record.matched
+                        and amount_sign(record.amount) == sign
+                    )
+                ]
 
-                if matched_right_group is None:
+                if len(left_records) < left_size:
                     continue
 
-                self.mark_match(
-                    left_records=list(
-                        left_group
-                    ),
-                    right_records=list(
-                        matched_right_group
-                    ),
-                    match_type=match_type,
-                )
+                if len(right_records) < right_size:
+                    continue
 
-                used_left_ids.update(
-                    id(record)
-                    for record in left_group
-                )
+                # --------------------------------------------------
+                # 情况一：左边是两笔。
+                # 为 Sheet1 两笔组合建立金额索引，
+                # 再枚举 Sheet2 的 right_size 笔组合。
+                # --------------------------------------------------
+                if left_size == 2:
+                    left_pair_index = {}
 
-                used_right_ids.update(
-                    id(record)
-                    for record
-                    in matched_right_group
-                )
+                    for left_group in combinations(
+                        left_records,
+                        2,
+                    ):
+                        total = sum_records(
+                            left_group
+                        )
 
-                matched_groups += 1
+                        left_pair_index.setdefault(
+                            total,
+                            [],
+                        ).append(left_group)
+
+                    for right_group in combinations(
+                        right_records,
+                        right_size,
+                    ):
+                        if any(
+                            record.matched
+                            for record in right_group
+                        ):
+                            continue
+
+                        right_total = sum_records(
+                            right_group
+                        )
+
+                        candidate_left_groups = (
+                            left_pair_index.get(
+                                right_total,
+                                [],
+                            )
+                        )
+
+                        matched_left_group = None
+
+                        for left_group in candidate_left_groups:
+                            if any(
+                                record.matched
+                                for record in left_group
+                            ):
+                                continue
+
+                            # 双重保险：两边合计必须完全一致。
+                            if not amount_equal(
+                                sum_records(left_group),
+                                right_total,
+                            ):
+                                continue
+
+                            matched_left_group = (
+                                left_group
+                            )
+                            break
+
+                        if matched_left_group is None:
+                            continue
+
+                        self.mark_match(
+                            left_records=list(
+                                matched_left_group
+                            ),
+                            right_records=list(
+                                right_group
+                            ),
+                            match_type=match_type,
+                        )
+
+                        matched_groups += 1
+
+                # --------------------------------------------------
+                # 情况二：右边是两笔。
+                # 为 Sheet2 两笔组合建立金额索引，
+                # 再枚举 Sheet1 的 left_size 笔组合。
+                # --------------------------------------------------
+                elif right_size == 2:
+                    right_pair_index = {}
+
+                    for right_group in combinations(
+                        right_records,
+                        2,
+                    ):
+                        total = sum_records(
+                            right_group
+                        )
+
+                        right_pair_index.setdefault(
+                            total,
+                            [],
+                        ).append(right_group)
+
+                    for left_group in combinations(
+                        left_records,
+                        left_size,
+                    ):
+                        if any(
+                            record.matched
+                            for record in left_group
+                        ):
+                            continue
+
+                        left_total = sum_records(
+                            left_group
+                        )
+
+                        candidate_right_groups = (
+                            right_pair_index.get(
+                                left_total,
+                                [],
+                            )
+                        )
+
+                        matched_right_group = None
+
+                        for right_group in candidate_right_groups:
+                            if any(
+                                record.matched
+                                for record in right_group
+                            ):
+                                continue
+
+                            if not amount_equal(
+                                left_total,
+                                sum_records(right_group),
+                            ):
+                                continue
+
+                            matched_right_group = (
+                                right_group
+                            )
+                            break
+
+                        if matched_right_group is None:
+                            continue
+
+                        self.mark_match(
+                            left_records=list(
+                                left_group
+                            ),
+                            right_records=list(
+                                matched_right_group
+                            ),
+                            match_type=match_type,
+                        )
+
+                        matched_groups += 1
+
+                else:
+                    raise ValueError(
+                        "Optimized many-to-many currently "
+                        "requires one side to have exactly 2 records."
+                    )
+
+        print(
+            f"  Finished {match_type}: "
+            f"{matched_groups} group(s)"
+        )
 
         return matched_groups
-
     def print_summary(
         self,
         results,
     ) -> None:
-        """打印各类匹配数量和剩余记录数量。"""
         remaining_sheet1 = sum(
             1
             for record in self.sheet1

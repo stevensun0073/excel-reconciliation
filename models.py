@@ -14,7 +14,7 @@ class Record:
     source_sheet: str = ""
 
     # 保存原始 Excel 中的辅助信息
-    # 例如流水号、摘要、日期、账户名、业务类型等
+    # 例如流水号、摘要、日期、账户名、Key word 等
     extra: dict[str, Any] = field(default_factory=dict)
 
     matched: bool = False
@@ -24,3 +24,7 @@ class Record:
 
     review_required: bool = False
     review_reason: str = ""
+
+    # 一对一匹配的关键词核验结果
+    keyword_match: bool = False
+    keyword_conflict: bool = False
