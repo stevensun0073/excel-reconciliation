@@ -11,6 +11,7 @@ from keyword_difference_matcher import (
     match_keyword_differences,
 )
 from matcher import Matcher
+from validate_matches import validate
 
 
 INPUT_FILE = "data.xlsx"
@@ -54,9 +55,9 @@ def main():
     )
 
     # 第三阶段：最终黄色区匹配。
-    # 不要求 Key word 相同，也不要求 Key word 为空。
-    # 只处理尚未匹配记录，支持 1↔1、1↔2...1↔6
-    # 及对称方向，并支持 2↔2。
+    # 不要求 Key word 相同。
+    # 只支持 1↔1 至 1↔6 及反向。
+    # 不执行 2↔2。
     final_yellow_results = (
         match_final_yellow_records(
             sheet1_records=sheet1_records,
@@ -68,7 +69,21 @@ def main():
         final_yellow_results
     )
 
-    # 最后只分析仍未匹配的黄色记录。
+    # 第四阶段：验证所有匹配关系。
+    # 如果 Partner Rows 不是双向一致，
+    # 或引用了不存在的记录，则停止生成结果文件。
+    validation_passed = validate(
+        sheet1_records,
+        sheet2_records,
+    )
+
+    if not validation_passed:
+        raise RuntimeError(
+            "Match validation failed. "
+            "Result file was not generated."
+        )
+
+    # 第五阶段：分析最终仍未匹配的记录。
     difference_result = analyze_difference(
         sheet1_records=sheet1_records,
         sheet2_records=sheet2_records,
@@ -78,6 +93,7 @@ def main():
         difference_result
     )
 
+    # 第六阶段：写入正式结果文件。
     save_results(
         workbook=workbook,
         sheet1_records=sheet1_records,

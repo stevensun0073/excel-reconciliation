@@ -1,236 +1,435 @@
-# Excel Reconciliation Engine
+# Excel Reconciliation V1.0
 
-A Python-based Excel reconciliation engine for bank reconciliation.
+Automatic Bank Reconciliation Tool
 
-The project focuses on automatic matching between a bank ledger and a bank statement, supporting multiple reconciliation strategies while preserving the original Excel files.
-
----
-
-# Current Status
-
-**Version:** V0.2
-
-Completed
-
-- ✅ Project structure
-- ✅ Record data model
-- ✅ Excel loading module
-- ✅ One-to-One matching engine
-- ✅ Amount tolerance (±0.01)
-- ✅ Git version control
-- ✅ .gitignore configuration
-
-In Progress
-
-- One-to-Two Match
-- Two-to-One Match
-- One-to-Three Match
-- Three-to-One Match
-- Two-to-Two Match
-- Excel result output
+Author: Steven Sun
 
 ---
 
-# Project Structure
+# 1. Project Overview
+
+本系统用于自动完成银行流水（Sheet1）与银行对账单（Sheet2）的金额匹配。
+
+设计目标：
+
+- 尽可能自动完成匹配
+- 不强行凑组合
+- 保留业务逻辑
+- 不确定的记录留给人工审核
+
+整个系统坚持：
+
+> 宁可少匹配，也不要错误匹配。
+
+---
+
+# 2. Workflow
+
+整个流程共六个阶段：
 
 ```
-excel-reconciliation/
-
-├── README.md
-├── ROADMAP.md
-├── CHANGELOG.md
-├── .gitignore
-├── requirements.txt
-│
-├── main.py
-├── models.py
-├── excel_io.py
-├── matcher.py
-│
-├── data.xlsx              (Local only)
-└── result_reconciliation.xlsx
+company.xlsx
+        │
+        ▼
+prepare_data.py
+        │
+        ▼
+data.xlsx（生成 Key word）
+        │
+        ▼
+main.py
+        │
+        ├── Stage 1  Exact Matching
+        ├── Stage 2  Keyword Difference
+        ├── Stage 3  Final Yellow Matching
+        ├── Stage 4  Validation
+        ├── Stage 5  Difference Analysis
+        ▼
+result_reconciliation.xlsx
 ```
 
 ---
 
-# Current Architecture
+# 3. Program Files
 
-```
-Excel
+## prepare_data.py
 
-    │
+负责数据预处理。
 
-    ▼
+功能：
 
-excel_io.py
+### Sheet1
 
-    │
+读取：
 
-    ▼
+- company.xlsx
+- 文本列
 
-Record Objects
+生成：
 
-    │
+Key word
 
-    ▼
+规则：
 
-Matcher
+- Company Keyword
+- KZ
+- GR
 
-    ├── ✅ One-to-One Match
-    ├── ⏳ One-to-Two Match
-    ├── ⏳ Two-to-One Match
-    ├── ⏳ One-to-Three Match
-    ├── ⏳ Three-to-One Match
-    └── ⏳ Two-to-Two Match
+其中：
 
-    │
+GR 包括：
 
-    ▼
+- GR
+- GREAT RESOURCES
+- Company-EL
+- Company-ACMV
+- Company-FP
+- Company-PS
 
-Excel Output
-```
+"-" 两边允许有空格。
 
----
+company.xlsx 由人工维护。
 
-# Matching Rules
-
-## Implemented
-
-### One-to-One Match
-
-One ledger record matches one bank statement record.
-
-Amount comparison allows a tolerance of **±0.01**.
+程序不会自动修改 company.xlsx。
 
 ---
 
-## Planned
+### Sheet2
 
-- One-to-Two Match
-- Two-to-One Match
-- One-to-Three Match
-- Three-to-One Match
-- Two-to-Two Match
+根据：
 
----
+Recipient's Account Name
 
-# Amount Comparison Rule
+自动提取：
 
-All amount comparisons use the same rule.
-
-```python
-abs(a - b) <= Decimal("0.01")
-```
-
-This rule is applied consistently throughout the project.
+Key word
 
 ---
 
-# Data Model
+## matcher.py
 
-Each transaction is represented as a Record object.
+负责：
 
-Fields include:
+所有 Keyword 相同情况下的金额匹配。
 
-- Excel row number
-- Amount
-- Matched status
-- Match type
-- Partner row(s)
+包括：
 
----
+1↔1
 
-# Design Principles
+1↔2
 
-- Never modify the original Excel file.
-- Preserve original row order.
-- Use Decimal for all amount calculations.
-- Every record can only be matched once.
-- Every matching algorithm uses the same tolerance rule (±0.01).
-- Develop incrementally and verify every stage before moving forward.
+2↔1
 
----
+...
 
-# Development Roadmap
+一直到
 
-## V0.1
+1↔10
 
-- Project initialization
-- Excel loading
-- Record model
+10↔1
 
-✅ Completed
+以及：
 
----
+2↔2
 
-## V0.2
+2↔3
 
-- One-to-One matching engine
+...
 
-✅ Completed
+等组合。
+
+原则：
+
+金额必须完全一致。
 
 ---
 
-## V0.3
+## keyword_difference_matcher.py
 
-- One-to-Two matching
+负责：
 
----
+Keyword 不同，
 
-## V0.4
+但业务规则可以确认的匹配。
 
-- Two-to-One matching
+包括：
 
----
+### Rule 1
 
-## V0.5
+唯一金额
 
-- One-to-Three matching
+1↔1
 
----
-
-## V0.6
-
-- Three-to-One matching
+Keyword 不同。
 
 ---
 
-## V0.7
+### Rule 2
 
-- Two-to-Two matching
+重复金额
 
----
+先消除 Keyword 相同。
 
-## V0.8
+如果剩余数量一致，
 
-- Excel result export
-
----
-
-## V1.0
-
-Complete Excel Reconciliation Engine
+逐条对应。
 
 ---
 
-# Current Test Result
+### Rule 3
 
-Using real reconciliation data:
+金额差额补齐
 
-```
-Sheet1 Records : 1561
+允许：
 
-Sheet2 Records : 1374
+最多三条空白 Keyword
 
-One-to-One Matched : 1218
+补足金额。
 
-Remaining Sheet1 : 343
+例如：
 
-Remaining Sheet2 : 156
-```
+2↔1
+
+3↔1
+
+这些记录：
+
+Excel 中显示：
+
+Keyword Difference (2-to-1)
+
+Keyword Difference (3-to-1)
 
 ---
 
-# License
+## final_yellow_matcher.py
 
-Private project.
+负责：
+
+最后剩余黄色记录。
+
+特点：
+
+不要求：
+
+Key word 相同。
+
+仅要求：
+
+金额一致。
+
+支持：
+
+1↔1
+
+1↔2
+
+...
+
+一直到
+
+1↔6
+
+及反向。
+
+不支持：
+
+2↔2
+
+以及更复杂组合。
+
+所有结果：
+
+蓝色。
+
+Match Type：
+
+Final Yellow Match (1-to-4)
+
+等。
+
+---
+
+## validate_matches.py
+
+负责：
+
+结果验证。
+
+检查：
+
+✓ Partner Rows 双向一致
+
+✓ 不引用不存在记录
+
+✓ 每条记录只能匹配一次
+
+验证失败：
+
+停止生成结果文件。
+
+---
+
+## difference_analyzer.py
+
+负责：
+
+最终剩余记录。
+
+计算：
+
+Sheet1
+
+减
+
+Sheet2
+
+剩余差额。
+
+寻找：
+
+最小组合。
+
+用于：
+
+人工最终审核。
+
+---
+
+## excel_io.py
+
+负责：
+
+Excel 输入输出。
+
+以及：
+
+颜色。
+
+---
+
+## models.py
+
+数据结构定义。
+
+Record
+
+等。
+
+---
+
+# 4. Color Rules
+
+绿色
+
+Key word 相同。
+
+可靠匹配。
+
+---
+
+浅棕色
+
+Keyword 不同。
+
+但业务规则确认。
+
+例如：
+
+Keyword Difference
+
+---
+
+蓝色
+
+Final Yellow Match
+
+最后金额匹配。
+
+不要求 Keyword 相同。
+
+---
+
+黄色
+
+最终未匹配。
+
+需要人工处理。
+
+---
+
+# 5. Matching Principles
+
+整个系统坚持：
+
+优先业务规则。
+
+其次金额。
+
+最后人工审核。
+
+绝不为了提高匹配率而强行组合。
+
+---
+
+# 6. Validation
+
+程序生成 Excel 前，
+
+必须通过：
+
+Validation。
+
+只有：
+
+Validation Passed
+
+才生成：
+
+result_reconciliation.xlsx
+
+---
+
+# 7. Current Matching Rules
+
+Keyword 相同：
+
+最高：
+
+1↔10
+
+Keyword 不同：
+
+Final Yellow：
+
+最高：
+
+1↔6
+
+Difference Analysis：
+
+最多：
+
+10 条组合。
+
+---
+
+# 8. Future Improvements
+
+计划：
+
+- 自动日志（Run Log）
+- Match Statistics Dashboard
+- HTML Report
+- Batch Processing
+- Rule Configuration
+- SQLite Database
+- Performance Optimization
+
+---
+
+# Version
+
+Current Version
+
+V1.0

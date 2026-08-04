@@ -33,72 +33,47 @@ SHEET_CONFIG = {
 
 
 # ============================================================
-# Color Rules
+# Final Color Rules
 #
-# One-to-One
-#     整行绿色
+# 绿色：
+#     Key word相同并成功匹配。
 #
-# One-to-One (KW)
-#     整行绿色
-#     Key word 不一致时，参与记录的 Key word 单元格为红色
+# 浅棕色：
+#     Key word不同，但按前置、较可靠业务规则匹配成功。
+#     包括：
+#     1. 唯一同金额的一对一，但Key word不同；
+#     2. 重复金额组先消除相同Key word后，
+#        两边剩余数量相同；
+#     3. 相同业务Key word存在金额差额，
+#        由单侧最多3条空白Key word记录补齐。
 #
-# One-to-Many / Many-to-One
-#     整行浅蓝色
+# 蓝色：
+#     最终黄色区中，不要求Key word相同而匹配成功；
+#     只支持1↔1到1↔6及其反向。
 #
-# Many-to-Many
-#     整行淡紫色
-#
-# Keyword-Difference
-#     整行浅橙色
-#     参与记录的 Key word 单元格全部为红色
-#
-# Unmatched
-#     整行黄色
-#
-# IMPORTANT:
-# 红色只用于“已经匹配成功但 Key word 存在不一致”的
-# 参与记录的 Key word 单元格。
-# 未匹配记录统一保持黄色。
+# 黄色：
+#     最终仍未匹配。
 # ============================================================
 
 
-# 一对一：柔和绿色
-ONE_TO_ONE_FILL = PatternFill(
-    start_color="B7D7A8",
-    end_color="B7D7A8",
+MATCHED_KEYWORD_SAME_FILL = PatternFill(
+    start_color="93C47D",
+    end_color="93C47D",
     fill_type="solid",
 )
 
-# Key word 差额补齐成功：浅橙色
-KEYWORD_DIFFERENCE_FILL = PatternFill(
-    start_color="FCE4D6",
-    end_color="FCE4D6",
+MATCHED_KEYWORD_DIFFERENT_FILL = PatternFill(
+    start_color="E3D5CA",
+    end_color="E3D5CA",
     fill_type="solid",
 )
 
-# 一对多 / 多对一：柔和蓝色
-ONE_TO_MANY_FILL = PatternFill(
+FINAL_YELLOW_MATCH_FILL = PatternFill(
     start_color="BDD7EE",
     end_color="BDD7EE",
     fill_type="solid",
 )
 
-# 多对多：淡紫色
-MANY_TO_MANY_FILL = PatternFill(
-    start_color="D9D2E9",
-    end_color="D9D2E9",
-    fill_type="solid",
-)
-
-# Key word 不同或为空：柔和红色
-# 只用于匹配成功且 keyword_conflict=True 的 Key word 单元格
-KEYWORD_CONFLICT_FILL = PatternFill(
-    start_color="E6B8AF",
-    end_color="E6B8AF",
-    fill_type="solid",
-)
-
-# 未匹配：黄色
 UNMATCHED_FILL = PatternFill(
     start_color="FFE699",
     end_color="FFE699",
@@ -157,7 +132,7 @@ def read_headers(sheet, last_data_column):
 
 
 def read_sheet(sheet):
-    """按照工作表配置读取金额、Key word 及原始辅助信息。"""
+    """按照工作表配置读取金额、Key word及原始辅助信息。"""
 
     config = get_sheet_config(sheet.title)
     amount_column = config["amount_column"]
@@ -188,7 +163,6 @@ def read_sheet(sheet):
                 continue
 
             header = headers[column]
-
             value = sheet.cell(
                 row=row,
                 column=column,
@@ -226,52 +200,35 @@ def load_excel(filename):
     )
 
 
-def is_one_to_many_or_many_to_one(match_type: str) -> bool:
-    """
-    判断是否属于一对多或多对一。
-
-    示例：
-        One-to-Four
-        Seven-to-One
-    """
-
-    return (
-        match_type.startswith("One-to-")
-        or match_type.endswith("-to-One")
-    )
-
-
 def get_fill(record):
     """
     根据最终状态返回整行颜色。
 
-    One-to-One / One-to-One (KW)：绿色
-    Keyword-Difference：浅橙色
-    一对多 / 多对一：蓝色
-    多对多：紫色
-    未匹配：黄色
+    未匹配：
+        黄色
+
+    Final Yellow Match：
+        蓝色
+
+    其他已匹配且 keyword_conflict=True：
+        浅棕色
+
+    其他已匹配记录：
+        绿色
     """
 
     if not record.matched:
         return UNMATCHED_FILL
 
     if record.match_type.startswith(
-        "Keyword-Difference"
+        "Final Yellow Match"
     ):
-        return KEYWORD_DIFFERENCE_FILL
+        return FINAL_YELLOW_MATCH_FILL
 
-    if record.match_type in {
-        "One-to-One",
-        "One-to-One (KW)",
-    }:
-        return ONE_TO_ONE_FILL
+    if record.keyword_conflict:
+        return MATCHED_KEYWORD_DIFFERENT_FILL
 
-    if is_one_to_many_or_many_to_one(
-        record.match_type
-    ):
-        return ONE_TO_MANY_FILL
-
-    return MANY_TO_MANY_FILL
+    return MATCHED_KEYWORD_SAME_FILL
 
 
 def get_result_last_column(sheet):
@@ -282,7 +239,7 @@ def get_result_last_column(sheet):
 
 
 def fill_row(sheet, row, fill):
-    """给一整行原始数据及匹配结果着色。"""
+    """给整行原始数据及匹配结果着色。"""
 
     last_column = get_result_last_column(sheet)
 
@@ -291,18 +248,6 @@ def fill_row(sheet, row, fill):
             row=row,
             column=column,
         ).fill = fill
-
-
-def fill_keyword_cell(sheet, row, fill):
-    """只给 Key word 单元格着色。"""
-
-    config = get_sheet_config(sheet.title)
-    key_word_column = config["key_word_column"]
-
-    sheet.cell(
-        row=row,
-        column=key_word_column,
-    ).fill = fill
 
 
 def clear_old_results(sheet):
@@ -355,12 +300,7 @@ def clear_old_results(sheet):
 
 
 def write_records(sheet, records):
-    """
-    写入匹配结果和颜色。
-
-    只要记录已经匹配成功且 keyword_conflict=True，
-    就把该记录的 Key word 单元格标红。
-    """
+    """写入匹配结果，并按最终四色规则着色。"""
 
     config = get_sheet_config(sheet.title)
 
@@ -374,16 +314,6 @@ def write_records(sheet, records):
             row=record.row,
             fill=get_fill(record),
         )
-
-        if (
-            record.matched
-            and record.keyword_conflict
-        ):
-            fill_keyword_cell(
-                sheet=sheet,
-                row=record.row,
-                fill=KEYWORD_CONFLICT_FILL,
-            )
 
         if not record.matched:
             continue
@@ -414,8 +344,8 @@ def set_result_column_widths(sheet):
 
     widths = {
         config["key_word_column"]: 24,
-        config["match_type_column"]: 24,
-        config["partner_column"]: 20,
+        config["match_type_column"]: 30,
+        config["partner_column"]: 24,
         config["review_column"]: 24,
     }
 
@@ -434,9 +364,8 @@ def save_results(
     """
     把匹配结果写入工作簿。
 
-    difference_result 继续保留在函数参数中，以兼容 main.py，
-    但不再使用橙色覆盖任何未匹配记录。
-    所有最终未匹配记录统一保持黄色。
+    difference_result 参数继续保留，以兼容 main.py；
+    但它不再改变任何行的颜色。
     """
 
     sheet1 = workbook["Sheet1"]

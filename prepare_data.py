@@ -128,10 +128,36 @@ KZ_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# GR、GREAT RESOURCES、ACMV、E、EL、FP、PS 必须是完整部分。
-GR_PATTERN = re.compile(
+# GR 或 GREAT RESOURCES 独立出现时，直接识别为 GR。
+GR_DIRECT_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])"
-    r"(?:GREAT\s+RESOURCES|GR|ACMV|E|EL|FP|PS)"
+    r"(?:GR|GREAT\s+RESOURCES)"
+    r"(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+# EL、ACMV、FP、PS 只有作为“前面有名称 + 连字符 + 后缀”
+# 的形式出现时，才识别为 GR。
+#
+# 可以识别：
+#   ABC-EL
+#   ABC - EL
+#   ABC- EL
+#   ABC -EL
+#   ABC COMPANY - ACMV
+#   XYZ-FP
+#   TEST - PS
+#
+# 不会识别单独出现的：
+#   EL
+#   ACMV
+#   FP
+#   PS
+GR_SUFFIX_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"[A-Za-z0-9]+(?:\s+[A-Za-z0-9]+)*"
+    r"\s*-\s*"
+    r"(?:EL|ACMV|FP|PS)"
     r"(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
@@ -142,7 +168,10 @@ def match_kz(text: str) -> bool:
 
 
 def match_gr(text: str) -> bool:
-    return bool(GR_PATTERN.search(text))
+    return (
+        bool(GR_DIRECT_PATTERN.search(text))
+        or bool(GR_SUFFIX_PATTERN.search(text))
+    )
 
 
 # ----------------------------------------------------------------------
