@@ -40,7 +40,7 @@ SHEET_CONFIG = {
 #
 # One-to-One (KW)
 #     整行绿色
-#     只有 Key word 单元格为红色
+#     Key word 不一致时，参与记录的 Key word 单元格为红色
 #
 # One-to-Many / Many-to-One
 #     整行浅蓝色
@@ -48,15 +48,17 @@ SHEET_CONFIG = {
 # Many-to-Many
 #     整行淡紫色
 #
+# Keyword-Difference
+#     整行浅橙色
+#     参与记录的 Key word 单元格全部为红色
+#
 # Unmatched
 #     整行黄色
 #
-# Difference Analyzer Candidate
-#     整行柔和橙色
-#
 # IMPORTANT:
-# 红色只能用于 One-to-One (KW) 的 Key word 单元格。
-# 其它任何记录、任何整行都不能使用红色。
+# 红色只用于“已经匹配成功但 Key word 存在不一致”的
+# 参与记录的 Key word 单元格。
+# 未匹配记录统一保持黄色。
 # ============================================================
 
 
@@ -64,6 +66,13 @@ SHEET_CONFIG = {
 ONE_TO_ONE_FILL = PatternFill(
     start_color="B7D7A8",
     end_color="B7D7A8",
+    fill_type="solid",
+)
+
+# Key word 差额补齐成功：浅橙色
+KEYWORD_DIFFERENCE_FILL = PatternFill(
+    start_color="FCE4D6",
+    end_color="FCE4D6",
     fill_type="solid",
 )
 
@@ -81,8 +90,8 @@ MANY_TO_MANY_FILL = PatternFill(
     fill_type="solid",
 )
 
-# Key word 不同或为空：柔和但醒目的红色
-# 只允许用于 One-to-One (KW) 的 Key word 单元格
+# Key word 不同或为空：柔和红色
+# 只用于匹配成功且 keyword_conflict=True 的 Key word 单元格
 KEYWORD_CONFLICT_FILL = PatternFill(
     start_color="E6B8AF",
     end_color="E6B8AF",
@@ -93,14 +102,6 @@ KEYWORD_CONFLICT_FILL = PatternFill(
 UNMATCHED_FILL = PatternFill(
     start_color="FFE699",
     end_color="FFE699",
-    fill_type="solid",
-)
-
-# Difference Analyzer 候选：柔和橙色
-# 不再使用红色，避免与 Key word 冲突提示混淆
-DIFFERENCE_CANDIDATE_FILL = PatternFill(
-    start_color="F4B183",
-    end_color="F4B183",
     fill_type="solid",
 )
 
@@ -245,6 +246,7 @@ def get_fill(record):
     根据最终状态返回整行颜色。
 
     One-to-One / One-to-One (KW)：绿色
+    Keyword-Difference：浅橙色
     一对多 / 多对一：蓝色
     多对多：紫色
     未匹配：黄色
@@ -252,6 +254,11 @@ def get_fill(record):
 
     if not record.matched:
         return UNMATCHED_FILL
+
+    if record.match_type.startswith(
+        "Keyword-Difference"
+    ):
+        return KEYWORD_DIFFERENCE_FILL
 
     if record.match_type in {
         "One-to-One",
@@ -351,8 +358,8 @@ def write_records(sheet, records):
     """
     写入匹配结果和颜色。
 
-    只有 One-to-One (KW) 才允许出现红色，
-    并且只把 Key word 单元格标红。
+    只要记录已经匹配成功且 keyword_conflict=True，
+    就把该记录的 Key word 单元格标红。
     """
 
     config = get_sheet_config(sheet.title)
@@ -368,11 +375,9 @@ def write_records(sheet, records):
             fill=get_fill(record),
         )
 
-        # 红色只适用于 One-to-One (KW) 的 Key word 单元格。
         if (
             record.matched
-            and record.match_type
-            == "One-to-One (KW)"
+            and record.keyword_conflict
         ):
             fill_keyword_cell(
                 sheet=sheet,
@@ -402,49 +407,6 @@ def write_records(sheet, records):
         ).value = record.review_reason
 
 
-def apply_difference_candidate_fill(
-    workbook,
-    difference_result,
-):
-    """
-    把 Difference Analyzer 选中的未匹配候选标成橙色。
-
-    为防止覆盖正式匹配的颜色：
-    如果该行已经写入 Match Type，则不再改变颜色。
-    """
-
-    if difference_result is None:
-        return
-
-    if not difference_result.selected_items:
-        return
-
-    for item in difference_result.selected_items:
-        if item.source_sheet not in workbook.sheetnames:
-            continue
-
-        sheet = workbook[item.source_sheet]
-        config = get_sheet_config(sheet.title)
-
-        match_type_value = sheet.cell(
-            row=item.source_row,
-            column=config["match_type_column"],
-        ).value
-
-        # 正式匹配的记录不能被 Difference Analyzer 覆盖颜色。
-        if (
-            match_type_value is not None
-            and str(match_type_value).strip()
-        ):
-            continue
-
-        fill_row(
-            sheet=sheet,
-            row=item.source_row,
-            fill=DIFFERENCE_CANDIDATE_FILL,
-        )
-
-
 def set_result_column_widths(sheet):
     """设置结果列宽。"""
 
@@ -452,7 +414,7 @@ def set_result_column_widths(sheet):
 
     widths = {
         config["key_word_column"]: 24,
-        config["match_type_column"]: 20,
+        config["match_type_column"]: 24,
         config["partner_column"]: 20,
         config["review_column"]: 24,
     }
@@ -469,7 +431,13 @@ def save_results(
     output_filename,
     difference_result=None,
 ):
-    """把匹配结果和差额候选写入工作簿。"""
+    """
+    把匹配结果写入工作簿。
+
+    difference_result 继续保留在函数参数中，以兼容 main.py，
+    但不再使用橙色覆盖任何未匹配记录。
+    所有最终未匹配记录统一保持黄色。
+    """
 
     sheet1 = workbook["Sheet1"]
     sheet2 = workbook["Sheet2"]
@@ -485,11 +453,6 @@ def save_results(
     write_records(
         sheet=sheet2,
         records=sheet2_records,
-    )
-
-    apply_difference_candidate_fill(
-        workbook=workbook,
-        difference_result=difference_result,
     )
 
     set_result_column_widths(sheet1)

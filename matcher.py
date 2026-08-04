@@ -404,7 +404,11 @@ class Matcher:
         """
         按顺序执行匹配。
 
-        1. 一对一；
+        1. 一对一：
+           - 先匹配相同金额、相同 Key word；
+           - 同金额组剩余数量相等时，剩余记录统一记为
+             Keyword Difference；
+           - 剩余数量不等时，保留给后续阶段。
         2. 一对多 / 多对一，最多 1↔10；
         3. 多对多只启用：
            2↔2
@@ -416,26 +420,14 @@ class Matcher:
         """
         results = {}
 
-        one_to_one_total = (
-            self.one_to_one_match()
-        )
+        (
+            one_to_one_count,
+            keyword_difference_count,
+        ) = self.one_to_one_match()
 
-        one_to_one_kw = sum(
-            1
-            for record in self.sheet1
-            if (
-                record.matched
-                and record.match_type
-                == "One-to-One (KW)"
-            )
-        )
-
-        results["One-to-One"] = (
-            one_to_one_total
-            - one_to_one_kw
-        )
-        results["One-to-One (KW)"] = (
-            one_to_one_kw
+        results["One-to-One"] = one_to_one_count
+        results["Keyword Difference"] = (
+            keyword_difference_count
         )
 
         for group_size in range(
@@ -482,21 +474,27 @@ class Matcher:
         self.print_summary(results)
 
         return results
-    def one_to_one_match(self) -> int:
-        """
-        执行一对一匹配。
 
-        规则：
-        1. 金额必须完全相等；
-        2. 金额在两边都唯一时，直接按金额匹配，
-           再用 Key word 决定颜色；
-        3. 金额在任一边重复时，只允许
-           Sheet2 的单个 Key word 出现在
-           Sheet1 的 Key word 集合中时匹配；
-        4. 重复金额但关键词不匹配或为空时，
-           留给后续组合匹配。
+    def one_to_one_match(self) -> tuple[int, int]:
         """
-        matched_groups = 0
+        执行同金额的一对一匹配。
+
+        每个金额组按以下规则处理：
+
+        1. 先优先匹配 Key word 相同的记录；
+        2. 匹配完相同 Key word 后：
+           - 如果两边剩余数量相同，则按行号顺序一一配对，
+             统一记为 Keyword Difference，并把两边
+             keyword_conflict 设为 True；
+           - 如果两边剩余数量不同，则全部保留给后续
+             一对多、多对一或其他匹配阶段；
+        3. 已经匹配的记录不会再次参与。
+
+        返回：
+            (正常 One-to-One 组数, Keyword Difference 组数)
+        """
+        one_to_one_groups = 0
+        keyword_difference_groups = 0
 
         sheet1_by_amount = {}
         sheet2_by_amount = {}
@@ -515,41 +513,22 @@ class Matcher:
                     [],
                 ).append(record)
 
-        for amount, left_group in sheet1_by_amount.items():
-            right_group = sheet2_by_amount.get(amount)
+        common_amounts = sorted(
+            set(sheet1_by_amount)
+            & set(sheet2_by_amount)
+        )
 
-            if not right_group:
-                continue
+        for amount in common_amounts:
+            left_group = sorted(
+                sheet1_by_amount[amount],
+                key=lambda record: record.row,
+            )
+            right_group = sorted(
+                sheet2_by_amount[amount],
+                key=lambda record: record.row,
+            )
 
-            if (
-                len(left_group) == 1
-                and len(right_group) == 1
-            ):
-                left = left_group[0]
-                right = right_group[0]
-
-                keyword_matched = (
-                    one_to_one_keywords_match(
-                        left,
-                        right,
-                    )
-                )
-
-                self.mark_match(
-                    left_records=[left],
-                    right_records=[right],
-                    match_type="One-to-One",
-                )
-
-                self.set_one_to_one_keyword_result(
-                    left=left,
-                    right=right,
-                    keyword_matched=keyword_matched,
-                )
-
-                matched_groups += 1
-                continue
-
+            # 第一步：同金额组内，优先匹配 Key word 相同的记录。
             for right in right_group:
                 if right.matched:
                     continue
@@ -582,9 +561,49 @@ class Matcher:
                     keyword_matched=True,
                 )
 
-                matched_groups += 1
+                one_to_one_groups += 1
 
-        return matched_groups
+            # 第二步：只有两边剩余数量相同，才直接一一配对。
+            remaining_left = [
+                record
+                for record in left_group
+                if not record.matched
+            ]
+            remaining_right = [
+                record
+                for record in right_group
+                if not record.matched
+            ]
+
+            if not remaining_left:
+                continue
+
+            if len(remaining_left) != len(remaining_right):
+                continue
+
+            for left, right in zip(
+                remaining_left,
+                remaining_right,
+            ):
+                self.mark_match(
+                    left_records=[left],
+                    right_records=[right],
+                    match_type="Keyword Difference",
+                )
+
+                for record in (left, right):
+                    record.keyword_match = False
+                    record.keyword_conflict = True
+                    record.review_required = False
+                    record.review_reason = ""
+
+                keyword_difference_groups += 1
+
+        return (
+            one_to_one_groups,
+            keyword_difference_groups,
+        )
+
     @staticmethod
     def get_same_direction_candidates(
         target,
