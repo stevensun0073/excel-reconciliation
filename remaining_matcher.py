@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import date, datetime
 from decimal import Decimal
+import re
 
 from matcher import amount_sign, sum_records
 
@@ -10,9 +12,13 @@ MAX_COMBINATION_SIZE = 6
 
 BLUE_UNIQUE_PREFIX = "Blue Unique Amount"
 BLUE_REFERENCE_PREFIX = "Blue Same Reference"
+BLUE_REVERSAL_PREFIX = "Blue Same Reference Reversal"
 
 YELLOW_KEYWORD_PREFIX = "Yellow Keyword Group"
 YELLOW_AMOUNT_PREFIX = "Yellow Amount Only"
+
+SPECIAL_MULTIPLE = Decimal("872")
+SPECIAL_MULTIPLE_REASON = "872的整数倍"
 
 
 def normalize(value) -> str:
@@ -37,6 +43,129 @@ def get_extra_value(record, possible_names) -> str:
             return normalize(value)
 
     return ""
+
+
+def get_raw_extra_value(record, possible_names):
+    """
+    从 record.extra 中按不区分大小写的字段名读取原始值。
+    """
+
+    normalized_names = {
+        normalize(name)
+        for name in possible_names
+    }
+
+    for key, value in record.extra.items():
+        if normalize(key) in normalized_names:
+            return value
+
+    return None
+
+
+def extract_reference_date(reference: str) -> str:
+    """
+    从银行流水号中提取 YYYYMMDD 日期。
+
+    例如：
+    650090000017880|20260528|051312...
+    返回：
+    20260528
+    """
+
+    if not reference:
+        return ""
+
+    match = re.search(
+        r"(?<!\d)(20\d{6})(?!\d)",
+        str(reference),
+    )
+
+    if match is None:
+        return ""
+
+    date_text = match.group(1)
+
+    try:
+        datetime.strptime(
+            date_text,
+            "%Y%m%d",
+        )
+    except ValueError:
+        return ""
+
+    return date_text
+
+
+def get_transaction_date(record) -> str:
+    """
+    从 Sheet2 Transaction Time 中取得 YYYYMMDD 日期。
+    """
+
+    value = get_raw_extra_value(
+        record,
+        {
+            "Transaction Time",
+            "transaction time",
+            "交易时间",
+            "交易日期",
+            "日期",
+        },
+    )
+
+    if value is None:
+        return ""
+
+    if isinstance(value, datetime):
+        return value.strftime("%Y%m%d")
+
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+
+    text = str(value).strip()
+
+    patterns = (
+        r"(?<!\d)(20\d{2})[-/\.](\d{1,2})[-/\.](\d{1,2})(?!\d)",
+        r"(?<!\d)(20\d{6})(?!\d)",
+    )
+
+    match = re.search(
+        patterns[0],
+        text,
+    )
+
+    if match is not None:
+        year, month, day = match.groups()
+
+        try:
+            parsed = datetime(
+                int(year),
+                int(month),
+                int(day),
+            )
+        except ValueError:
+            return ""
+
+        return parsed.strftime("%Y%m%d")
+
+    match = re.search(
+        patterns[1],
+        text,
+    )
+
+    if match is None:
+        return ""
+
+    date_text = match.group(1)
+
+    try:
+        datetime.strptime(
+            date_text,
+            "%Y%m%d",
+        )
+    except ValueError:
+        return ""
+
+    return date_text
 
 
 def get_key_word(record) -> str:
@@ -129,6 +258,36 @@ def mark_match(
         record.keyword_conflict = True
 
 
+def mark_internal_sheet1_group(
+    records,
+    match_type: str,
+    review_reason: str,
+) -> None:
+    """
+    标记Sheet1内部同组关系。
+
+    每条记录的Partner Rows列出同组内其余所有行号。
+    """
+
+    group_rows = [
+        record.row
+        for record in records
+    ]
+
+    for record in records:
+        record.matched = True
+        record.match_type = match_type
+        record.partners = [
+            row
+            for row in group_rows
+            if row != record.row
+        ]
+        record.review_required = False
+        record.review_reason = review_reason
+        record.keyword_match = False
+        record.keyword_conflict = True
+
+
 # ============================================================
 # 淡蓝色规则一：
 # 双方唯一金额一对一
@@ -198,6 +357,10 @@ def match_unique_amount_one_to_one(
 # ============================================================
 # 淡蓝色规则二：
 # Sheet1 同银行流水号全部记录 → Sheet2 单条
+#
+# 若 Sheet2 有多条相同金额候选：
+# 用银行流水号中的日期与 Transaction Time 日期核对。
+# 只有日期能够唯一锁定一条候选时才匹配。
 # ============================================================
 
 def match_same_reference_group_to_one(
@@ -219,6 +382,7 @@ def match_same_reference_group_to_one(
 
     matched_groups = 0
     matched_sheet1_rows = 0
+    date_resolved_groups = 0
 
     for reference, group_records in groups.items():
         if len(group_records) < 2:
@@ -238,11 +402,41 @@ def match_same_reference_group_to_one(
             )
         ]
 
-        # 必须只有一条唯一候选。
-        if len(candidates) != 1:
+        if not candidates:
             continue
 
-        sheet2_record = candidates[0]
+        sheet2_record = None
+        review_reason = "同银行流水号多对一"
+
+        if len(candidates) == 1:
+            sheet2_record = candidates[0]
+
+        else:
+            reference_date = extract_reference_date(
+                reference
+            )
+
+            if not reference_date:
+                continue
+
+            date_candidates = [
+                record
+                for record in candidates
+                if (
+                    get_transaction_date(record)
+                    == reference_date
+                )
+            ]
+
+            if len(date_candidates) != 1:
+                continue
+
+            sheet2_record = date_candidates[0]
+            review_reason = (
+                "同银行流水号多对一；"
+                "重复金额按流水号日期唯一确定"
+            )
+            date_resolved_groups += 1
 
         mark_match(
             left_records=group_records,
@@ -251,7 +445,7 @@ def match_same_reference_group_to_one(
                 f"{BLUE_REFERENCE_PREFIX} "
                 f"({len(group_records)}-to-1)"
             ),
-            review_reason="同银行流水号多对一",
+            review_reason=review_reason,
         )
 
         matched_groups += 1
@@ -259,6 +453,194 @@ def match_same_reference_group_to_one(
 
     return {
         "groups": matched_groups,
+        "sheet1_rows": matched_sheet1_rows,
+        "date_resolved_groups": date_resolved_groups,
+    }
+
+
+# ============================================================
+# 淡蓝色规则三：
+# Sheet1内部正负冲销
+#
+# 只处理Sheet1，不处理Sheet2。
+#
+# 分组规则：
+# 1. 相同有效银行流水号归为同一组；
+# 2. 流水号为空、None、False、"false"、"none"，
+#    全部视为同一个流水号组；
+# 3. 不同有效流水号绝不互相冲销。
+#
+# 执行位置：
+# 黄色组合全部完成以后。
+#
+# 匹配规则：
+# 1. 同组全部剩余记录合计严格等于0，整组冲销；
+# 2. 若整组不为0，继续匹配金额绝对值完全相同的
+#    一正一负记录。
+# ============================================================
+
+def normalize_reversal_reference(reference: str) -> str:
+    normalized_reference = normalize(reference)
+
+    if normalized_reference in {
+        "",
+        "false",
+        "none",
+    }:
+        return "__NO_REFERENCE__"
+
+    return normalized_reference
+
+
+def match_same_reference_reversals(
+    sheet1_records,
+) -> dict:
+    groups = defaultdict(list)
+
+    for record in sheet1_records:
+        if record.matched:
+            continue
+
+        reference = normalize_reversal_reference(
+            get_bank_reference(record)
+        )
+
+        groups[reference].append(record)
+
+    matched_zero_sum_groups = 0
+    matched_pairs = 0
+    matched_sheet1_rows = 0
+
+    for reference in sorted(groups):
+        group_records = sorted(
+            (
+                record
+                for record in groups[reference]
+                if not record.matched
+            ),
+            key=lambda record: record.row,
+        )
+
+        if len(group_records) < 2:
+            continue
+
+        group_total = sum_records(
+            group_records
+        )
+
+        # 同组全部剩余记录合计严格为0：
+        # 整组标记为Sheet1内部冲销。
+        if group_total == Decimal("0"):
+            if reference == "__NO_REFERENCE__":
+                review_reason = (
+                    "Sheet1空流水号记录整组合计为零"
+                )
+            else:
+                review_reason = (
+                    "Sheet1同银行流水号整组合计为零"
+                )
+
+            mark_internal_sheet1_group(
+                records=group_records,
+                match_type=(
+                    f"{BLUE_REVERSAL_PREFIX} "
+                    f"({len(group_records)}-row group)"
+                ),
+                review_reason=review_reason,
+            )
+
+            matched_zero_sum_groups += 1
+            matched_sheet1_rows += len(
+                group_records
+            )
+            continue
+
+        # 整组不为0时，保留原有的一正一负精确冲销。
+        positives = defaultdict(list)
+        negatives = defaultdict(list)
+
+        for record in group_records:
+            if record.matched:
+                continue
+
+            if record.amount > 0:
+                positives[
+                    record.amount
+                ].append(record)
+
+            elif record.amount < 0:
+                negatives[
+                    abs(record.amount)
+                ].append(record)
+
+        for amount in sorted(positives):
+            positive_records = positives[
+                amount
+            ]
+
+            negative_records = negatives.get(
+                amount,
+                [],
+            )
+
+            pair_count = min(
+                len(positive_records),
+                len(negative_records),
+            )
+
+            for index in range(
+                pair_count
+            ):
+                positive_record = (
+                    positive_records[index]
+                )
+
+                negative_record = (
+                    negative_records[index]
+                )
+
+                if (
+                    positive_record.matched
+                    or negative_record.matched
+                ):
+                    continue
+
+                if (
+                    positive_record.amount
+                    + negative_record.amount
+                    != Decimal("0")
+                ):
+                    continue
+
+                if reference == "__NO_REFERENCE__":
+                    review_reason = (
+                        "Sheet1空流水号正负冲销"
+                    )
+                else:
+                    review_reason = (
+                        "Sheet1同银行流水号正负冲销"
+                    )
+
+                mark_internal_sheet1_group(
+                    records=[
+                        positive_record,
+                        negative_record,
+                    ],
+                    match_type=(
+                        f"{BLUE_REVERSAL_PREFIX} "
+                        "(1-to-1)"
+                    ),
+                    review_reason=review_reason,
+                )
+
+                matched_pairs += 1
+                matched_sheet1_rows += 2
+
+    return {
+        "zero_sum_groups": (
+            matched_zero_sum_groups
+        ),
+        "pairs": matched_pairs,
         "sheet1_rows": matched_sheet1_rows,
     }
 
@@ -707,6 +1089,35 @@ def match_amount_many_to_one(
 
 
 # ============================================================
+# 最终特殊标记：
+# 对最后仍未匹配、且金额绝对值为872整数倍的记录，
+# 保持未匹配状态，仅写入复核说明。
+# ============================================================
+
+def mark_remaining_872_multiples(records) -> int:
+    marked_rows = 0
+
+    for record in records:
+        if record.matched:
+            continue
+
+        amount = abs(record.amount)
+
+        # 0不作为872的整数倍进行特殊标记。
+        if amount == Decimal("0"):
+            continue
+
+        if amount % SPECIAL_MULTIPLE != Decimal("0"):
+            continue
+
+        record.review_required = True
+        record.review_reason = SPECIAL_MULTIPLE_REASON
+        marked_rows += 1
+
+    return marked_rows
+
+
+# ============================================================
 # 正式剩余记录流程
 # ============================================================
 
@@ -718,10 +1129,17 @@ def match_remaining_records(
         "blue_unique_one_to_one": 0,
         "blue_reference_groups": 0,
         "blue_reference_sheet1_rows": 0,
+        "blue_reference_date_resolved": 0,
+        "blue_reversal_zero_sum_groups": 0,
+        "blue_reversal_pairs": 0,
+        "blue_reversal_sheet1_rows": 0,
+        "blue_unique_final_one_to_one": 0,
         "keyword_one_to_many": {},
         "keyword_many_to_one": {},
         "amount_one_to_many": {},
         "amount_many_to_one": {},
+        "multiple_872_sheet1": 0,
+        "multiple_872_sheet2": 0,
         "remaining_sheet1": 0,
         "remaining_sheet2": 0,
     }
@@ -748,6 +1166,10 @@ def match_remaining_records(
 
     results["blue_reference_sheet1_rows"] = (
         reference_result["sheet1_rows"]
+    )
+
+    results["blue_reference_date_resolved"] = (
+        reference_result["date_resolved_groups"]
     )
 
     # 淡黄色第一轮：
@@ -794,6 +1216,54 @@ def match_remaining_records(
             group_size,
         )
 
+    # 淡蓝色三：
+    # 黄色组合全部完成后，
+    # 仅对Sheet1剩余记录执行内部正负冲销。
+    reversal_result = (
+        match_same_reference_reversals(
+            sheet1_records,
+        )
+    )
+
+    results[
+        "blue_reversal_zero_sum_groups"
+    ] = reversal_result[
+        "zero_sum_groups"
+    ]
+
+    results["blue_reversal_pairs"] = (
+        reversal_result["pairs"]
+    )
+
+    results["blue_reversal_sheet1_rows"] = (
+        reversal_result["sheet1_rows"]
+    )
+
+    # 淡蓝色收尾：
+    # 黄色组合完成后，部分重复金额可能已经变成
+    # 双方剩余唯一金额，因此再执行一次唯一金额一对一。
+    results["blue_unique_final_one_to_one"] = (
+        match_unique_amount_one_to_one(
+            sheet1_records,
+            sheet2_records,
+        )
+    )
+
+    # 最终特殊规则：
+    # 对仍未匹配且金额为872整数倍的记录进行特殊着色和说明。
+    # 这些记录仍然属于未匹配记录。
+    results["multiple_872_sheet1"] = (
+        mark_remaining_872_multiples(
+            sheet1_records,
+        )
+    )
+
+    results["multiple_872_sheet2"] = (
+        mark_remaining_872_multiples(
+            sheet2_records,
+        )
+    )
+
     results["remaining_sheet1"] = len(
         unmatched_records(sheet1_records)
     )
@@ -829,6 +1299,31 @@ def print_remaining_match_summary(
     print(
         "  Same reference Sheet1 rows : "
         f"{results['blue_reference_sheet1_rows']}"
+    )
+
+    print(
+        "  Date-resolved groups       : "
+        f"{results['blue_reference_date_resolved']}"
+    )
+
+    print(
+        "  Reversal zero-sum groups   : "
+        f"{results['blue_reversal_zero_sum_groups']}"
+    )
+
+    print(
+        "  Reversal pairs             : "
+        f"{results['blue_reversal_pairs']}"
+    )
+
+    print(
+        "  Reversal Sheet1 rows       : "
+        f"{results['blue_reversal_sheet1_rows']}"
+    )
+
+    print(
+        "  Final unique 1-to-1        : "
+        f"{results['blue_unique_final_one_to_one']}"
     )
 
     print()
@@ -871,6 +1366,19 @@ def print_remaining_match_summary(
     print(
         "  Sheet1 BANK can only match "
         "Sheet2 Charging"
+    )
+
+    print()
+    print("Final Special Marking")
+
+    print(
+        "  Sheet1 multiples of 872    : "
+        f"{results['multiple_872_sheet1']}"
+    )
+
+    print(
+        "  Sheet2 multiples of 872    : "
+        f"{results['multiple_872_sheet2']}"
     )
 
     print()

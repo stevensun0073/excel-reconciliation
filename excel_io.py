@@ -74,6 +74,7 @@ MATCHED_KEYWORD_DIFFERENT_FILL = PatternFill(
 # 淡蓝色：
 # 1. 双方唯一金额一对一
 # 2. Sheet1同银行流水号多对一
+# 3. Sheet1同银行流水号正负冲销
 BLUE_MATCH_FILL = PatternFill(
     start_color="BDD7EE",
     end_color="BDD7EE",
@@ -88,10 +89,25 @@ LIGHT_YELLOW_MATCH_FILL = PatternFill(
     fill_type="solid",
 )
 
+# 中黄色：
+# 最终仍未匹配，但金额为872的整数倍
+MULTIPLE_872_FILL = PatternFill(
+    start_color="FFE699",
+    end_color="FFE699",
+    fill_type="solid",
+)
+
 # 深黄色：最终仍未匹配
 UNMATCHED_FILL = PatternFill(
     start_color="FFD966",
     end_color="FFD966",
+    fill_type="solid",
+)
+
+# 深红色：Difference Analysis 最终差异组合
+DIFFERENCE_ANALYSIS_FILL = PatternFill(
+    start_color="EA9999",
+    end_color="EA9999",
     fill_type="solid",
 )
 
@@ -268,6 +284,9 @@ def get_fill(record):
     """
 
     if not record.matched:
+        if record.review_reason == "872的整数倍":
+            return MULTIPLE_872_FILL
+
         return UNMATCHED_FILL
 
     if record.match_type.startswith("Blue "):
@@ -381,7 +400,7 @@ def clear_old_results(sheet):
 
 
 def write_records(sheet, records):
-    """写入匹配关系并按规则着色。"""
+    """写入匹配关系、复核说明并按规则着色。"""
 
     config = get_sheet_config(sheet.title)
 
@@ -404,7 +423,15 @@ def write_records(sheet, records):
             fill=get_fill(record),
         )
 
+        # 未匹配但属于872整数倍的记录：
+        # 仍然保持未匹配，只写入Review说明。
         if not record.matched:
+            if record.review_reason:
+                sheet.cell(
+                    row=record.row,
+                    column=review_column,
+                ).value = record.review_reason
+
             continue
 
         sheet.cell(
@@ -475,5 +502,27 @@ def save_results(
 
     set_result_column_widths(sheet1)
     set_result_column_widths(sheet2)
+
+    # Difference Analysis 最终选中的差异记录：
+    # 只覆盖整行颜色，不修改匹配状态、Match Type、
+    # Partner Rows、Review 或任何金额数据。
+    if (
+        difference_result is not None
+        and difference_result.selected_items
+    ):
+        for item in difference_result.selected_items:
+            if item.source_sheet == "Sheet1":
+                fill_row(
+                    sheet=sheet1,
+                    row=item.source_row,
+                    fill=DIFFERENCE_ANALYSIS_FILL,
+                )
+
+            elif item.source_sheet == "Sheet2":
+                fill_row(
+                    sheet=sheet2,
+                    row=item.source_row,
+                    fill=DIFFERENCE_ANALYSIS_FILL,
+                )
 
     workbook.save(output_filename)
