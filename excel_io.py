@@ -14,6 +14,31 @@ if TYPE_CHECKING:
 HEADER_ROW = 2
 START_ROW = 3
 
+
+# ============================================================
+# 固定文件格式
+#
+# Sheet1：
+# A 银行流水号
+# B 文本
+# C 金额
+# D Key word
+# E Match Type
+# F Partner Rows
+# G Review
+#
+# Sheet2：
+# A Transaction Time
+# B Recipient's Account Name
+# C Business Type
+# D Description
+# E Transaction Amount
+# F Key word
+# G Match Type
+# H Partner Rows
+# I Review
+# ============================================================
+
 SHEET_CONFIG = {
     "Sheet1": {
         "amount_column": 3,       # C列
@@ -23,84 +48,91 @@ SHEET_CONFIG = {
         "review_column": 7,       # G列
     },
     "Sheet2": {
-        "amount_column": 6,       # F列
-        "key_word_column": 7,     # G列
-        "match_type_column": 8,   # H列
-        "partner_column": 9,      # I列
-        "review_column": 10,      # J列
+        "amount_column": 5,       # E列
+        "key_word_column": 6,     # F列
+        "match_type_column": 7,   # G列
+        "partner_column": 8,      # H列
+        "review_column": 9,       # I列
     },
 }
 
 
-# ============================================================
-# Final Color Rules
-#
-# 绿色：
-#     Key word相同并成功匹配。
-#
-# 浅棕色：
-#     Key word不同，但按前置、较可靠业务规则匹配成功。
-#     包括：
-#     1. 唯一同金额的一对一，但Key word不同；
-#     2. 重复金额组先消除相同Key word后，
-#        两边剩余数量相同；
-#     3. 相同业务Key word存在金额差额，
-#        由单侧最多3条空白Key word记录补齐。
-#
-# 蓝色：
-#     最终黄色区中，不要求Key word相同而匹配成功；
-#     只支持1↔1到1↔6及其反向。
-#
-# 黄色：
-#     最终仍未匹配。
-# ============================================================
-
-
+# 绿色：原有关键词相同匹配
 MATCHED_KEYWORD_SAME_FILL = PatternFill(
     start_color="93C47D",
     end_color="93C47D",
     fill_type="solid",
 )
 
+# 棕色：原有可靠但关键词不同匹配
 MATCHED_KEYWORD_DIFFERENT_FILL = PatternFill(
     start_color="E3D5CA",
     end_color="E3D5CA",
     fill_type="solid",
 )
 
-FINAL_YELLOW_MATCH_FILL = PatternFill(
+# 淡蓝色：
+# 1. 双方唯一金额一对一
+# 2. Sheet1同银行流水号多对一
+BLUE_MATCH_FILL = PatternFill(
     start_color="BDD7EE",
     end_color="BDD7EE",
     fill_type="solid",
 )
 
+# 淡黄色：
+# Key word组优先组合及后续纯金额组合
+LIGHT_YELLOW_MATCH_FILL = PatternFill(
+    start_color="FFF2CC",
+    end_color="FFF2CC",
+    fill_type="solid",
+)
+
+# 深黄色：最终仍未匹配
 UNMATCHED_FILL = PatternFill(
-    start_color="FFE699",
-    end_color="FFE699",
+    start_color="FFD966",
+    end_color="FFD966",
     fill_type="solid",
 )
 
 
 def parse_amount(value):
-    """把 Excel 金额安全转换为 Decimal。"""
+    """把Excel金额安全转换为Decimal。"""
 
     if value is None:
         return None
 
     try:
-        cleaned_value = str(value).replace(",", "").strip()
+        cleaned_value = (
+            str(value)
+            .replace(",", "")
+            .strip()
+        )
 
         if not cleaned_value:
             return None
 
+        if (
+            cleaned_value.startswith("(")
+            and cleaned_value.endswith(")")
+        ):
+            cleaned_value = (
+                "-"
+                + cleaned_value[1:-1]
+            )
+
         return Decimal(cleaned_value)
 
-    except (InvalidOperation, AttributeError, ValueError):
+    except (
+        InvalidOperation,
+        AttributeError,
+        ValueError,
+    ):
         return None
 
 
 def get_sheet_config(sheet_name):
-    """取得指定工作表的读取和输出配置。"""
+    """取得指定工作表的列配置。"""
 
     if sheet_name not in SHEET_CONFIG:
         raise ValueError(
@@ -111,18 +143,35 @@ def get_sheet_config(sheet_name):
 
 
 def read_headers(sheet, last_data_column):
-    """读取第2行中的原始字段名称。"""
+    """
+    读取第2行的原始字段名称。
+
+    Sheet1读取A至D；
+    Sheet2读取A至F。
+
+    因此Sheet2的Business Type会保存在record.extra中，
+    供BANK只能匹配Charging规则使用。
+    """
 
     headers = {}
 
-    for column in range(1, last_data_column + 1):
+    for column in range(
+        1,
+        last_data_column + 1,
+    ):
         value = sheet.cell(
             row=HEADER_ROW,
             column=column,
         ).value
 
-        if value is None or str(value).strip() == "":
-            header = f"Column {get_column_letter(column)}"
+        if (
+            value is None
+            or str(value).strip() == ""
+        ):
+            header = (
+                f"Column "
+                f"{get_column_letter(column)}"
+            )
         else:
             header = str(value).strip()
 
@@ -132,9 +181,12 @@ def read_headers(sheet, last_data_column):
 
 
 def read_sheet(sheet):
-    """按照工作表配置读取金额、Key word及原始辅助信息。"""
+    """
+    按固定格式读取金额、Key word及原始辅助字段。
+    """
 
     config = get_sheet_config(sheet.title)
+
     amount_column = config["amount_column"]
     key_word_column = config["key_word_column"]
 
@@ -145,7 +197,10 @@ def read_sheet(sheet):
 
     records = []
 
-    for row in range(START_ROW, sheet.max_row + 1):
+    for row in range(
+        START_ROW,
+        sheet.max_row + 1,
+    ):
         amount = parse_amount(
             sheet.cell(
                 row=row,
@@ -158,11 +213,15 @@ def read_sheet(sheet):
 
         extra = {}
 
-        for column in range(1, key_word_column + 1):
+        for column in range(
+            1,
+            key_word_column + 1,
+        ):
             if column == amount_column:
                 continue
 
             header = headers[column]
+
             value = sheet.cell(
                 row=row,
                 column=column,
@@ -183,11 +242,14 @@ def read_sheet(sheet):
 
 
 def load_excel(filename):
-    """打开工作簿并读取 Sheet1、Sheet2。"""
+    """打开工作簿并读取Sheet1和Sheet2。"""
 
     workbook = load_workbook(filename)
 
-    for sheet_name in ("Sheet1", "Sheet2"):
+    for sheet_name in (
+        "Sheet1",
+        "Sheet2",
+    ):
         if sheet_name not in workbook.sheetnames:
             raise ValueError(
                 f"找不到工作表 {sheet_name}。"
@@ -202,28 +264,17 @@ def load_excel(filename):
 
 def get_fill(record):
     """
-    根据最终状态返回整行颜色。
-
-    未匹配：
-        黄色
-
-    Final Yellow Match：
-        蓝色
-
-    其他已匹配且 keyword_conflict=True：
-        浅棕色
-
-    其他已匹配记录：
-        绿色
+    根据最终匹配状态返回颜色。
     """
 
     if not record.matched:
         return UNMATCHED_FILL
 
-    if record.match_type.startswith(
-        "Final Yellow Match"
-    ):
-        return FINAL_YELLOW_MATCH_FILL
+    if record.match_type.startswith("Blue "):
+        return BLUE_MATCH_FILL
+
+    if record.match_type.startswith("Yellow "):
+        return LIGHT_YELLOW_MATCH_FILL
 
     if record.keyword_conflict:
         return MATCHED_KEYWORD_DIFFERENT_FILL
@@ -232,18 +283,26 @@ def get_fill(record):
 
 
 def get_result_last_column(sheet):
-    """取得该工作表结果区域的最后一列。"""
+    """取得结果区域最后一列。"""
 
     config = get_sheet_config(sheet.title)
+
     return config["review_column"]
 
 
 def fill_row(sheet, row, fill):
-    """给整行原始数据及匹配结果着色。"""
+    """
+    给数据行和结果列着色。
+
+    不处理第1行，因此不会影响求和公式。
+    """
 
     last_column = get_result_last_column(sheet)
 
-    for column in range(1, last_column + 1):
+    for column in range(
+        1,
+        last_column + 1,
+    ):
         sheet.cell(
             row=row,
             column=column,
@@ -251,13 +310,29 @@ def fill_row(sheet, row, fill):
 
 
 def clear_old_results(sheet):
-    """清除上一次运行留下的匹配结果和颜色。"""
+    """
+    清除上次运行留下的匹配结果和颜色。
+
+    不增加列；
+    不删除列；
+    不移动原始数据；
+    不增加工作表；
+    不修改第1行求和公式。
+    """
 
     config = get_sheet_config(sheet.title)
 
-    match_type_column = config["match_type_column"]
-    partner_column = config["partner_column"]
-    review_column = config["review_column"]
+    match_type_column = (
+        config["match_type_column"]
+    )
+
+    partner_column = (
+        config["partner_column"]
+    )
+
+    review_column = (
+        config["review_column"]
+    )
 
     headers = {
         match_type_column: "Match Type",
@@ -276,8 +351,14 @@ def clear_old_results(sheet):
 
     last_column = get_result_last_column(sheet)
 
-    for row in range(START_ROW, sheet.max_row + 1):
-        for column in range(1, last_column + 1):
+    for row in range(
+        START_ROW,
+        sheet.max_row + 1,
+    ):
+        for column in range(
+            1,
+            last_column + 1,
+        ):
             sheet.cell(
                 row=row,
                 column=column,
@@ -300,13 +381,21 @@ def clear_old_results(sheet):
 
 
 def write_records(sheet, records):
-    """写入匹配结果，并按最终四色规则着色。"""
+    """写入匹配关系并按规则着色。"""
 
     config = get_sheet_config(sheet.title)
 
-    match_type_column = config["match_type_column"]
-    partner_column = config["partner_column"]
-    review_column = config["review_column"]
+    match_type_column = (
+        config["match_type_column"]
+    )
+
+    partner_column = (
+        config["partner_column"]
+    )
+
+    review_column = (
+        config["review_column"]
+    )
 
     for record in records:
         fill_row(
@@ -338,20 +427,25 @@ def write_records(sheet, records):
 
 
 def set_result_column_widths(sheet):
-    """设置结果列宽。"""
+    """设置Key word和结果列宽。"""
 
     config = get_sheet_config(sheet.title)
 
     widths = {
         config["key_word_column"]: 24,
-        config["match_type_column"]: 30,
+        config["match_type_column"]: 32,
         config["partner_column"]: 24,
-        config["review_column"]: 24,
+        config["review_column"]: 28,
     }
 
     for column, width in widths.items():
-        column_letter = get_column_letter(column)
-        sheet.column_dimensions[column_letter].width = width
+        column_letter = (
+            get_column_letter(column)
+        )
+
+        sheet.column_dimensions[
+            column_letter
+        ].width = width
 
 
 def save_results(
@@ -361,12 +455,7 @@ def save_results(
     output_filename,
     difference_result=None,
 ):
-    """
-    把匹配结果写入工作簿。
-
-    difference_result 参数继续保留，以兼容 main.py；
-    但它不再改变任何行的颜色。
-    """
+    """把最终匹配结果写入工作簿。"""
 
     sheet1 = workbook["Sheet1"]
     sheet2 = workbook["Sheet2"]

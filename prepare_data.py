@@ -3,21 +3,50 @@ prepare_data.py
 
 独立的数据准备程序，在 main.py 之前运行。
 
+固定文件格式
+------------
+Sheet1：
+A  银行流水号
+B  文本
+C  以公司代码货币计算的金额
+D  Key word
+E  Match Type
+F  Partner Rows
+G  Review
+
+Sheet2：
+A  Transaction Time
+B  Recipient's Account Name
+C  Business Type
+D  Description
+E  Transaction Amount
+F  Key word
+G  Match Type
+H  Partner Rows
+I  Review
+
 功能
 ----
 1. Sheet1
-   - 读取 data.xlsx 的“文本”列。
+   - 读取“文本”列。
    - 读取 company.xlsx 已整理好的“Company Keyword”列。
-   - 按完整单词/完整组合进行匹配。
-   - 在最右侧新增或更新“Key word”列。
+   - 按完整单词或完整组合进行匹配。
+   - Key word 永远写入 D 列。
    - 一条文本可以输出多个关键词，用“; ”分隔。
    - KZ、GR 使用特殊业务规则。
 
 2. Sheet2
    - 不与 company.xlsx 匹配。
    - 直接读取“Recipient's Account Name”。
-   - 按公司名称提取规则生成一个“Key word”。
-   - 在最右侧新增或更新“Key word”列。
+   - 按公司名称提取规则生成一个 Key word。
+   - Key word 永远写入 F 列。
+
+3. 固定格式
+   - 不再在最右侧新增 Key word 列。
+   - 不删除列。
+   - 不移动原始数据。
+   - 不修改第一行公式。
+   - 会清理固定列以外残留的旧 Key word 列内容。
 
 本程序不会执行金额对账，也不会自动运行 main.py。
 """
@@ -29,32 +58,44 @@ from pathlib import Path
 from typing import Pattern
 
 from openpyxl import load_workbook
+from openpyxl.styles import Font
 
 
 COMPANY_FILE = Path("company.xlsx")
 DATA_FILE = Path("data.xlsx")
 
 COMPANY_KEYWORD_HEADER = "Company Keyword"
+
 SHEET1_TEXT_HEADER = "文本"
 SHEET2_NAME_HEADER = "Recipient's Account Name"
+
 OUTPUT_HEADER = "Key word"
 
 HEADER_SEARCH_ROWS = 5
 
+# 固定输出列
+SHEET1_KEYWORD_COLUMN = 4  # D列
+SHEET2_KEYWORD_COLUMN = 6  # F列
 
-# ----------------------------------------------------------------------
+
+# ============================================================
 # 通用工具
-# ----------------------------------------------------------------------
+# ============================================================
 
 def normalize_spaces(value: str) -> str:
+    """把连续空格合并为一个空格，并删除首尾空格。"""
+
     return re.sub(r"\s+", " ", value).strip()
 
 
 def require_file(path: Path) -> None:
+    """确认文件存在。"""
+
     if not path.exists():
         raise FileNotFoundError(
             f"找不到文件：{path}\n"
-            "请确认文件位于当前项目目录，并检查文件名大小写。"
+            "请确认文件位于当前项目目录，"
+            "并检查文件名大小写。"
         )
 
 
@@ -63,46 +104,116 @@ def find_header(
     header_name: str,
     search_rows: int = HEADER_SEARCH_ROWS,
 ) -> tuple[int, int]:
-    """返回 (表头行号, 列号)。"""
-    last_row = min(search_rows, worksheet.max_row)
+    """
+    查找指定表头。
+
+    返回：
+        (表头行号, 列号)
+    """
+
+    last_row = min(
+        search_rows,
+        worksheet.max_row,
+    )
 
     for row in range(1, last_row + 1):
-        for column in range(1, worksheet.max_column + 1):
-            value = worksheet.cell(row, column).value
+        for column in range(
+            1,
+            worksheet.max_column + 1,
+        ):
+            value = worksheet.cell(
+                row=row,
+                column=column,
+            ).value
 
             if value is None:
                 continue
 
-            if str(value).strip().casefold() == header_name.casefold():
+            if (
+                str(value).strip().casefold()
+                == header_name.casefold()
+            ):
                 return row, column
 
     raise ValueError(
-        f'在工作表“{worksheet.title}”前 {last_row} 行中'
-        f'找不到表头“{header_name}”。'
+        f'在工作表“{worksheet.title}”'
+        f'前 {last_row} 行中找不到表头'
+        f'“{header_name}”。'
     )
 
 
-def find_or_create_output_column(
+def prepare_fixed_output_column(
     worksheet,
     header_row: int,
+    output_column: int,
     header_name: str,
-) -> int:
-    """如果输出列已存在则复用，否则在当前最右侧新增。"""
-    for column in range(1, worksheet.max_column + 1):
-        value = worksheet.cell(header_row, column).value
+) -> None:
+    """
+    设置固定的 Key word 输出列。
 
-        if value is None:
+    同时清理其他列中残留的旧 Key word 表头及其数据，
+    但不会删除列，也不会移动任何数据。
+    """
+
+    # 清理固定列之外重复的旧 Key word 列。
+    for column in range(
+        1,
+        worksheet.max_column + 1,
+    ):
+        if column == output_column:
             continue
 
-        if str(value).strip().casefold() == header_name.casefold():
-            return column
+        header_value = worksheet.cell(
+            row=header_row,
+            column=column,
+        ).value
 
-    output_column = worksheet.max_column + 1
-    worksheet.cell(header_row, output_column).value = header_name
-    return output_column
+        if header_value is None:
+            continue
+
+        if (
+            str(header_value).strip().casefold()
+            != header_name.casefold()
+        ):
+            continue
+
+        worksheet.cell(
+            row=header_row,
+            column=column,
+        ).value = None
+
+        for row in range(
+            header_row + 1,
+            worksheet.max_row + 1,
+        ):
+            worksheet.cell(
+                row=row,
+                column=column,
+            ).value = None
+
+    # 固定位置写入表头。
+    header_cell = worksheet.cell(
+        row=header_row,
+        column=output_column,
+    )
+
+    header_cell.value = header_name
+    header_cell.font = Font(bold=True)
+
+    # 清除固定列的旧关键词结果。
+    for row in range(
+        header_row + 1,
+        worksheet.max_row + 1,
+    ):
+        worksheet.cell(
+            row=row,
+            column=output_column,
+        ).value = None
 
 
 def unique_in_order(values: list[str]) -> list[str]:
+    """去重，同时保留原来的顺序。"""
+
     result: list[str] = []
     seen: set[str] = set()
 
@@ -118,17 +229,17 @@ def unique_in_order(values: list[str]) -> list[str]:
     return result
 
 
-# ----------------------------------------------------------------------
+# ============================================================
 # KZ / GR 特殊匹配规则
-# ----------------------------------------------------------------------
+# ============================================================
 
-# KZ 或 KASZON 必须能够作为独立部分区分出来。
 KZ_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])(?:KZ|KASZON)(?![A-Za-z0-9])",
+    r"(?<![A-Za-z0-9])"
+    r"(?:KZ|KASZON)"
+    r"(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 
-# GR 或 GREAT RESOURCES 独立出现时，直接识别为 GR。
 GR_DIRECT_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])"
     r"(?:GR|GREAT\s+RESOURCES)"
@@ -136,26 +247,10 @@ GR_DIRECT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# EL、ACMV、FP、PS 只有作为“前面有名称 + 连字符 + 后缀”
-# 的形式出现时，才识别为 GR。
-#
-# 可以识别：
-#   ABC-EL
-#   ABC - EL
-#   ABC- EL
-#   ABC -EL
-#   ABC COMPANY - ACMV
-#   XYZ-FP
-#   TEST - PS
-#
-# 不会识别单独出现的：
-#   EL
-#   ACMV
-#   FP
-#   PS
 GR_SUFFIX_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])"
-    r"[A-Za-z0-9]+(?:\s+[A-Za-z0-9]+)*"
+    r"[A-Za-z0-9]+"
+    r"(?:\s+[A-Za-z0-9]+)*"
     r"\s*-\s*"
     r"(?:EL|ACMV|FP|PS)"
     r"(?![A-Za-z0-9])",
@@ -164,51 +259,70 @@ GR_SUFFIX_PATTERN = re.compile(
 
 
 def match_kz(text: str) -> bool:
+    """判断文本是否满足 KZ 特殊规则。"""
+
     return bool(KZ_PATTERN.search(text))
 
 
 def match_gr(text: str) -> bool:
+    """判断文本是否满足 GR 特殊规则。"""
+
     return (
         bool(GR_DIRECT_PATTERN.search(text))
         or bool(GR_SUFFIX_PATTERN.search(text))
     )
 
 
-# ----------------------------------------------------------------------
-# Sheet1：用 company.xlsx 的 Company Keyword 进行匹配
-# ----------------------------------------------------------------------
+# ============================================================
+# Sheet1：使用 company.xlsx 的 Company Keyword 匹配
+# ============================================================
 
 def contains_chinese(text: str) -> bool:
-    return bool(re.search(r"[\u4e00-\u9fff]", text))
+    """判断文本是否包含中文字符。"""
+
+    return bool(
+        re.search(r"[\u4e00-\u9fff]", text)
+    )
 
 
-def build_normal_keyword_pattern(keyword: str) -> Pattern[str]:
+def build_normal_keyword_pattern(
+    keyword: str,
+) -> Pattern[str]:
     """
-    完整单词/完整组合匹配。
+    建立完整单词或完整组合匹配规则。
 
     例如：
-    ARM 匹配 “PAYMENT TO ARM”，
-    但不匹配 FARM 或 ARMY。
+    ARM 可以匹配 PAYMENT TO ARM，
+    但不能匹配 FARM 或 ARMY。
     """
+
     parts = keyword.split()
 
     if len(parts) > 1:
-        body = r"\s+".join(re.escape(part) for part in parts)
+        body = r"\s+".join(
+            re.escape(part)
+            for part in parts
+        )
     else:
         body = re.escape(keyword)
 
     return re.compile(
-        rf"(?<![A-Za-z0-9]){body}(?![A-Za-z0-9])",
+        rf"(?<![A-Za-z0-9])"
+        rf"{body}"
+        rf"(?![A-Za-z0-9])",
         re.IGNORECASE,
     )
 
 
-def load_company_keywords() -> list[tuple[str, Pattern[str] | None]]:
+def load_company_keywords(
+) -> list[tuple[str, Pattern[str] | None]]:
     """
     从 company.xlsx 读取唯一的 Company Keyword。
 
-    KZ、GR 不放入普通关键词列表，因为它们使用专门规则。
+    KZ 和 GR 不放入普通关键词列表，
+    因为它们使用专门的业务规则。
     """
+
     require_file(COMPANY_FILE)
 
     workbook = load_workbook(
@@ -216,7 +330,10 @@ def load_company_keywords() -> list[tuple[str, Pattern[str] | None]]:
         data_only=True,
         read_only=True,
     )
-    worksheet = workbook[workbook.sheetnames[0]]
+
+    worksheet = workbook[
+        workbook.sheetnames[0]
+    ]
 
     header_row, keyword_column = find_header(
         worksheet,
@@ -226,13 +343,21 @@ def load_company_keywords() -> list[tuple[str, Pattern[str] | None]]:
     keywords: list[str] = []
     seen: set[str] = set()
 
-    for row in range(header_row + 1, worksheet.max_row + 1):
-        value = worksheet.cell(row, keyword_column).value
+    for row in range(
+        header_row + 1,
+        worksheet.max_row + 1,
+    ):
+        value = worksheet.cell(
+            row=row,
+            column=keyword_column,
+        ).value
 
         if value is None:
             continue
 
-        keyword = normalize_spaces(str(value))
+        keyword = normalize_spaces(
+            str(value)
+        )
 
         if not keyword:
             continue
@@ -248,24 +373,44 @@ def load_company_keywords() -> list[tuple[str, Pattern[str] | None]]:
         seen.add(normalized)
         keywords.append(keyword)
 
-    # 较长组合优先输出。
-    keywords.sort(key=lambda item: (-len(item), item.casefold()))
+    # 较长组合优先。
+    keywords.sort(
+        key=lambda item: (
+            -len(item),
+            item.casefold(),
+        )
+    )
 
-    compiled: list[tuple[str, Pattern[str] | None]] = []
+    compiled: list[
+        tuple[str, Pattern[str] | None]
+    ] = []
 
     for keyword in keywords:
         if contains_chinese(keyword):
-            compiled.append((keyword, None))
+            compiled.append(
+                (keyword, None)
+            )
         else:
-            compiled.append((keyword, build_normal_keyword_pattern(keyword)))
+            compiled.append(
+                (
+                    keyword,
+                    build_normal_keyword_pattern(
+                        keyword
+                    ),
+                )
+            )
 
     return compiled
 
 
 def match_sheet1_text(
     text: str,
-    normal_keywords: list[tuple[str, Pattern[str] | None]],
+    normal_keywords: list[
+        tuple[str, Pattern[str] | None]
+    ],
 ) -> list[str]:
+    """对 Sheet1 文本提取全部符合规则的关键词。"""
+
     matches: list[str] = []
 
     # 特殊规则优先。
@@ -288,10 +433,20 @@ def match_sheet1_text(
 
 def process_sheet1(
     workbook,
-    normal_keywords: list[tuple[str, Pattern[str] | None]],
+    normal_keywords: list[
+        tuple[str, Pattern[str] | None]
+    ],
 ) -> dict[str, int]:
+    """
+    处理 Sheet1。
+
+    Key word 固定写入 D 列。
+    """
+
     if "Sheet1" not in workbook.sheetnames:
-        raise ValueError('data.xlsx 中找不到工作表“Sheet1”。')
+        raise ValueError(
+            'data.xlsx 中找不到工作表“Sheet1”。'
+        )
 
     worksheet = workbook["Sheet1"]
 
@@ -299,44 +454,70 @@ def process_sheet1(
         worksheet,
         SHEET1_TEXT_HEADER,
     )
-    output_column = find_or_create_output_column(
-        worksheet,
-        header_row,
-        OUTPUT_HEADER,
+
+    prepare_fixed_output_column(
+        worksheet=worksheet,
+        header_row=header_row,
+        output_column=SHEET1_KEYWORD_COLUMN,
+        header_name=OUTPUT_HEADER,
     )
 
-    # 重新运行时清除旧结果。
-    for row in range(header_row + 1, worksheet.max_row + 1):
-        worksheet.cell(row, output_column).value = None
+    total_rows = (
+        worksheet.max_row - header_row
+    )
 
-    total_rows = worksheet.max_row - header_row
     matched_rows = 0
     unmatched_rows = 0
     empty_rows = 0
     multiple_rows = 0
 
-    print(f"Processing Sheet1: {total_rows} rows...")
+    print(
+        f"Processing Sheet1: "
+        f"{total_rows} rows..."
+    )
 
-    for row in range(header_row + 1, worksheet.max_row + 1):
+    for row in range(
+        header_row + 1,
+        worksheet.max_row + 1,
+    ):
         processed = row - header_row
 
         if processed % 200 == 0:
-            print(f"  Sheet1 processed {processed}/{total_rows} rows...")
+            print(
+                f"  Sheet1 processed "
+                f"{processed}/{total_rows} rows..."
+            )
 
-        raw_text = worksheet.cell(row, text_column).value
+        raw_text = worksheet.cell(
+            row=row,
+            column=text_column,
+        ).value
 
-        if raw_text is None or not str(raw_text).strip():
+        if (
+            raw_text is None
+            or not str(raw_text).strip()
+        ):
             empty_rows += 1
             continue
 
-        text = normalize_spaces(str(raw_text))
-        matches = match_sheet1_text(text, normal_keywords)
+        text = normalize_spaces(
+            str(raw_text)
+        )
+
+        matches = match_sheet1_text(
+            text,
+            normal_keywords,
+        )
 
         if not matches:
             unmatched_rows += 1
             continue
 
-        worksheet.cell(row, output_column).value = "; ".join(matches)
+        worksheet.cell(
+            row=row,
+            column=SHEET1_KEYWORD_COLUMN,
+        ).value = "; ".join(matches)
+
         matched_rows += 1
 
         if len(matches) > 1:
@@ -348,50 +529,56 @@ def process_sheet1(
         "unmatched": unmatched_rows,
         "empty": empty_rows,
         "multiple": multiple_rows,
-        "output_column": output_column,
+        "output_column": (
+            SHEET1_KEYWORD_COLUMN
+        ),
     }
 
 
-# ----------------------------------------------------------------------
-# Sheet2：直接从 Recipient's Account Name 提取关键词
-# ----------------------------------------------------------------------
+# ============================================================
+# Sheet2：从 Recipient's Account Name 提取关键词
+# ============================================================
 
-def clean_company_name(company_name: str) -> str:
+def clean_company_name(
+    company_name: str,
+) -> str:
     """删除括号说明并整理空格。"""
-    text = re.sub(r"\([^)]*\)", " ", company_name)
+
+    text = re.sub(
+        r"\([^)]*\)",
+        " ",
+        company_name,
+    )
+
     return normalize_spaces(text)
 
 
 def is_single_letter(token: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z]", token))
+    """判断是否为单个英文字母。"""
+
+    return bool(
+        re.fullmatch(r"[A-Za-z]", token)
+    )
 
 
 def is_only_number(token: str) -> bool:
-    return bool(re.fullmatch(r"\d+", token))
+    """判断是否为纯数字。"""
+
+    return bool(
+        re.fullmatch(r"\d+", token)
+    )
 
 
-def extract_sheet2_keyword(account_name: str) -> str:
+def extract_sheet2_keyword(
+    account_name: str,
+) -> str:
     """
-    直接从 Recipient's Account Name 提取 Key word。
-
-    规则示例：
-    APPLE ENGINEERING             -> APPLE
-    THE BUILDERS                  -> BUILDERS
-    SINGAPORE ENGINEERING         -> ENGINEERING
-    S POWER GLOBAL                -> S POWER
-    S K HARDWARE                  -> S K HARDWARE
-    A & B ENGINEERING             -> A & B
-    A-B ENGINEERING               -> A-B
-    A/B ENGINEERING               -> A/B
-    10 DEGREE SOLAR               -> 10 DEGREE
-    KASZON                        -> KZ
-    ABC-KZ                        -> KZ
-    GREAT RESOURCES               -> GR
-    NORTHUMBERLAND - ACMV         -> GR
-    零星采购                       -> 零星
-    中国建筑                       -> 中国
+    从 Recipient's Account Name 提取 Key word。
     """
-    text = normalize_spaces(str(account_name))
+
+    text = normalize_spaces(
+        str(account_name)
+    )
 
     if not text:
         return ""
@@ -418,20 +605,31 @@ def extract_sheet2_keyword(account_name: str) -> str:
 
     first = tokens[0]
 
-    # THE / SINGAPORE 开头时取第二个词。
-    if first.casefold() in {"the", "singapore"}:
+    # THE 或 SINGAPORE 开头时取第二个词。
+    if first.casefold() in {
+        "the",
+        "singapore",
+    }:
         if len(tokens) >= 2:
             return tokens[1]
+
         return first
 
-    # A-B、A/B、PRO-WERKZE 等视为完整组合。
-    if re.fullmatch(r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)+", first):
+    # A-B、A/B、PRO-WERKZE 等完整组合。
+    if re.fullmatch(
+        r"[A-Za-z0-9]+"
+        r"(?:[-/][A-Za-z0-9]+)+",
+        first,
+    ):
         return first
 
-    # 数字开头：数字 + 后面一个词。
+    # 数字开头：数字加后面一个词。
     if is_only_number(first):
         if len(tokens) >= 2:
-            return f"{first} {tokens[1]}"
+            return (
+                f"{first} {tokens[1]}"
+            )
+
         return first
 
     # A & B 作为整体。
@@ -441,9 +639,12 @@ def extract_sheet2_keyword(account_name: str) -> str:
         and tokens[1] == "&"
         and is_single_letter(tokens[2])
     ):
-        return f"{tokens[0]} & {tokens[2]}"
+        return (
+            f"{tokens[0]} & {tokens[2]}"
+        )
 
-    # 一个或多个单字母开头，与后面第一个有效词组合。
+    # 一个或多个单字母开头，
+    # 与后面第一个有效词组合。
     if is_single_letter(first):
         parts: list[str] = []
 
@@ -456,15 +657,27 @@ def extract_sheet2_keyword(account_name: str) -> str:
             if not is_single_letter(token):
                 break
 
-        return normalize_spaces(" ".join(parts))
+        return normalize_spaces(
+            " ".join(parts)
+        )
 
     # 普通名称取第一个词。
     return first
 
 
-def process_sheet2(workbook) -> dict[str, int]:
+def process_sheet2(
+    workbook,
+) -> dict[str, int]:
+    """
+    处理 Sheet2。
+
+    Key word 固定写入 F 列。
+    """
+
     if "Sheet2" not in workbook.sheetnames:
-        raise ValueError('data.xlsx 中找不到工作表“Sheet2”。')
+        raise ValueError(
+            'data.xlsx 中找不到工作表“Sheet2”。'
+        )
 
     worksheet = workbook["Sheet2"]
 
@@ -472,67 +685,114 @@ def process_sheet2(workbook) -> dict[str, int]:
         worksheet,
         SHEET2_NAME_HEADER,
     )
-    output_column = find_or_create_output_column(
-        worksheet,
-        header_row,
-        OUTPUT_HEADER,
+
+    prepare_fixed_output_column(
+        worksheet=worksheet,
+        header_row=header_row,
+        output_column=SHEET2_KEYWORD_COLUMN,
+        header_name=OUTPUT_HEADER,
     )
 
-    # 重新运行时清除旧结果。
-    for row in range(header_row + 1, worksheet.max_row + 1):
-        worksheet.cell(row, output_column).value = None
+    total_rows = (
+        worksheet.max_row - header_row
+    )
 
-    total_rows = worksheet.max_row - header_row
     generated_rows = 0
     empty_rows = 0
 
-    print(f"Processing Sheet2: {total_rows} rows...")
+    print(
+        f"Processing Sheet2: "
+        f"{total_rows} rows..."
+    )
 
-    for row in range(header_row + 1, worksheet.max_row + 1):
+    for row in range(
+        header_row + 1,
+        worksheet.max_row + 1,
+    ):
         processed = row - header_row
 
         if processed % 200 == 0:
-            print(f"  Sheet2 processed {processed}/{total_rows} rows...")
+            print(
+                f"  Sheet2 processed "
+                f"{processed}/{total_rows} rows..."
+            )
 
-        raw_name = worksheet.cell(row, name_column).value
+        raw_name = worksheet.cell(
+            row=row,
+            column=name_column,
+        ).value
 
-        if raw_name is None or not str(raw_name).strip():
+        if (
+            raw_name is None
+            or not str(raw_name).strip()
+        ):
             empty_rows += 1
             continue
 
-        keyword = extract_sheet2_keyword(str(raw_name))
+        keyword = extract_sheet2_keyword(
+            str(raw_name)
+        )
 
         if keyword:
-            worksheet.cell(row, output_column).value = keyword
+            worksheet.cell(
+                row=row,
+                column=SHEET2_KEYWORD_COLUMN,
+            ).value = keyword
+
             generated_rows += 1
 
     return {
         "total": total_rows,
         "generated": generated_rows,
         "empty": empty_rows,
-        "output_column": output_column,
+        "output_column": (
+            SHEET2_KEYWORD_COLUMN
+        ),
     }
 
 
-# ----------------------------------------------------------------------
+# ============================================================
 # 主程序
-# ----------------------------------------------------------------------
+# ============================================================
 
 def main() -> None:
+    """执行数据准备。"""
+
     require_file(DATA_FILE)
 
-    print("Loading Company Keyword master data...")
-    normal_keywords = load_company_keywords()
-    print(f"Loaded {len(normal_keywords)} unique normal keywords.")
-    print("Special rules enabled: KZ, GR")
+    print(
+        "Loading Company Keyword "
+        "master data..."
+    )
+
+    normal_keywords = (
+        load_company_keywords()
+    )
+
+    print(
+        f"Loaded {len(normal_keywords)} "
+        f"unique normal keywords."
+    )
+
+    print(
+        "Special rules enabled: KZ, GR"
+    )
 
     print("Opening data.xlsx...")
+
     workbook = load_workbook(DATA_FILE)
 
-    sheet1_result = process_sheet1(workbook, normal_keywords)
-    sheet2_result = process_sheet2(workbook)
+    sheet1_result = process_sheet1(
+        workbook,
+        normal_keywords,
+    )
+
+    sheet2_result = process_sheet2(
+        workbook
+    )
 
     print("Saving data.xlsx...")
+
     workbook.save(DATA_FILE)
 
     print("=" * 60)
@@ -540,20 +800,54 @@ def main() -> None:
     print("=" * 60)
 
     print("Sheet1")
-    print(f"  Rows processed      : {sheet1_result['total']}")
-    print(f"  Matched rows        : {sheet1_result['matched']}")
-    print(f"  Unmatched rows      : {sheet1_result['unmatched']}")
-    print(f"  Empty text rows     : {sheet1_result['empty']}")
-    print(f"  Multiple matches    : {sheet1_result['multiple']}")
-    print(f"  Key word column     : {sheet1_result['output_column']}")
+    print(
+        f"  Rows processed      : "
+        f"{sheet1_result['total']}"
+    )
+    print(
+        f"  Matched rows        : "
+        f"{sheet1_result['matched']}"
+    )
+    print(
+        f"  Unmatched rows      : "
+        f"{sheet1_result['unmatched']}"
+    )
+    print(
+        f"  Empty text rows     : "
+        f"{sheet1_result['empty']}"
+    )
+    print(
+        f"  Multiple matches    : "
+        f"{sheet1_result['multiple']}"
+    )
+    print(
+        f"  Key word column     : "
+        f"{sheet1_result['output_column']}"
+    )
 
     print("Sheet2")
-    print(f"  Rows processed      : {sheet2_result['total']}")
-    print(f"  Keywords generated  : {sheet2_result['generated']}")
-    print(f"  Empty name rows     : {sheet2_result['empty']}")
-    print(f"  Key word column     : {sheet2_result['output_column']}")
+    print(
+        f"  Rows processed      : "
+        f"{sheet2_result['total']}"
+    )
+    print(
+        f"  Keywords generated  : "
+        f"{sheet2_result['generated']}"
+    )
+    print(
+        f"  Empty name rows     : "
+        f"{sheet2_result['empty']}"
+    )
+    print(
+        f"  Key word column     : "
+        f"{sheet2_result['output_column']}"
+    )
 
-    print(f"Saved file            : {DATA_FILE.resolve()}")
+    print(
+        f"Saved file            : "
+        f"{DATA_FILE.resolve()}"
+    )
+
     print("=" * 60)
 
 
